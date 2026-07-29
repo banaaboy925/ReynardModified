@@ -240,7 +240,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             support/idevice/target
-          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v9-structural-desktop-capture
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v10-direct-desktop-branch
           restore-keys: |
             reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
 
@@ -642,41 +642,37 @@ jobs:
 
           empty_marker = '"video_engine/desktop_capture_impl_empty.cc"'
           mac_marker = '"video_engine/desktop_capture_impl.cc"'
-          next_block_marker = '    if "WEBRTC_USE_PIPEWIRE" in DEFINES:'
+          tab_marker = '"video_engine/tab_capturer.cc"'
+          device_marker = '"video_engine/desktop_device_info.cc"'
+          pipewire_marker = '    if "WEBRTC_USE_PIPEWIRE" in DEFINES:'
 
-          empty_pos = systemservices_text.find(empty_marker)
+          # Firefox 153 always contains the macOS implementation in the
+          # desktop-capture else branch. Locate that branch by its source
+          # filename, then replace the entire conditional. This does not depend
+          # on Reynard's patch having already inserted the empty implementation.
           mac_pos = systemservices_text.find(mac_marker)
-
-          if empty_pos < 0:
-              raise SystemExit(
-                  "The patched moz.build does not contain the empty "
-                  "desktop-capture implementation"
-              )
           if mac_pos < 0:
               raise SystemExit(
-                  "The patched moz.build does not contain the macOS "
-                  "desktop-capture implementation"
+                  "Could not find Firefox's macOS desktop-capture source"
               )
 
           block_start = systemservices_text.rfind(
-              "\n    if ", 0, empty_pos
+              "\n    if ", 0, mac_pos
           )
           block_end = systemservices_text.find(
-              "\n" + next_block_marker, mac_pos
+              "\n" + pipewire_marker, mac_pos
           )
 
           if block_start < 0 or block_end < 0 or block_start >= block_end:
               raise SystemExit(
-                  "Could not locate the desktop-capture source-selection block"
+                  "Could not locate Firefox's complete desktop-capture block"
               )
 
           block_start += 1
           replacement_block = "\n".join(
               [
-                  "    # This source tree is configured only for",
-                  "    # Reynard's iOS build. Desktop screen capture is",
-                  "    # unavailable here, so use Firefox's empty",
-                  "    # implementation instead of the macOS implementation.",
+                  "    # Reynard iOS: desktop screen capture is unavailable.",
+                  "    # Compile Firefox's empty implementation only.",
                   "    UNIFIED_SOURCES += [",
                   '        "EmptyDesktopCapturer.cpp",',
                   '        "video_engine/desktop_capture_impl_empty.cc",',
@@ -693,25 +689,32 @@ jobs:
           systemservices.write_text(systemservices_text)
 
           final_text = systemservices.read_text()
+          required = [
+              '"EmptyDesktopCapturer.cpp"',
+              empty_marker,
+              pipewire_marker,
+          ]
+          for marker in required:
+              if marker not in final_text:
+                  raise SystemExit(
+                      f"Required desktop-capture marker is missing: {marker}"
+                  )
+
+          forbidden = [mac_marker, tab_marker, device_marker]
+          for marker in forbidden:
+              if marker in final_text:
+                  raise SystemExit(
+                      f"macOS desktop-capture source remains: {marker}"
+                  )
+
           if final_text.count(empty_marker) != 1:
               raise SystemExit(
-                  "Expected exactly one empty desktop-capture source"
-              )
-          if mac_marker in final_text:
-              raise SystemExit(
-                  "macOS desktop_capture_impl.cc remains in the iOS build file"
-              )
-          if '"video_engine/tab_capturer.cc"' in final_text:
-              raise SystemExit(
-                  "macOS tab_capturer.cc remains in the iOS build file"
-              )
-          if '"video_engine/desktop_device_info.cc"' in final_text:
-              raise SystemExit(
-                  "macOS desktop_device_info.cc remains in the iOS build file"
+                  "Expected exactly one empty desktop-capture implementation"
               )
 
           print(
-              "iOS empty desktop-capture block structurally rewritten",
+              "Replaced Firefox's macOS desktop-capture branch with the "
+              "iOS-safe empty implementation",
               flush=True,
           )
           PY
@@ -734,7 +737,7 @@ jobs:
             engine/firefox/dom/media/systemservices/moz.build
 
           echo "WebRTC H264 and iOS desktop-capture source selection verified"
-          sed -n '/This source tree is configured only for/,+8p' \
+          sed -n '/Reynard iOS: desktop screen capture/,+7p' \
             engine/firefox/dom/media/systemservices/moz.build
           sed -n '1,65p' \
             engine/firefox/dom/media/webrtc/jsapi/DefaultCodecPreferences.cpp
@@ -790,22 +793,27 @@ jobs:
           GECKO_OBJ="engine/firefox/obj-aarch64-apple-ios"
           test -d "$GECKO_OBJ"
 
-          if grep -R -F -q "video_engine/desktop_capture_impl.cc" \
-              "$GECKO_OBJ"; then
-            echo "::error::Configured iOS build still contains macOS desktop_capture_impl.cc"
-            grep -R -F -n "video_engine/desktop_capture_impl.cc" \
-              "$GECKO_OBJ" | head -20 || true
-            exit 1
-          fi
+          # backend.mk is the useful generated source list when present.
+          # Do not scan the entire object tree, because configuration caches can
+          # mention source-tree filenames that are not selected for compilation.
+          BACKEND_MK="$GECKO_OBJ/dom/media/systemservices/backend.mk"
+          if [ -f "$BACKEND_MK" ]; then
+            if grep -F -q "video_engine/desktop_capture_impl.cc" "$BACKEND_MK"; then
+              echo "::error::Generated backend selected macOS desktop_capture_impl.cc"
+              grep -F -n "desktop_capture" "$BACKEND_MK" || true
+              exit 1
+            fi
 
-          if ! grep -R -F -q "video_engine/desktop_capture_impl_empty.cc" \
-              "$GECKO_OBJ"; then
-            echo "::error::Configured iOS build did not select desktop_capture_impl_empty.cc"
-            grep -R -F -n "desktop_capture" "$GECKO_OBJ" | head -50 || true
-            exit 1
-          fi
+            if ! grep -F -q "video_engine/desktop_capture_impl_empty.cc" "$BACKEND_MK"; then
+              echo "::error::Generated backend omitted desktop_capture_impl_empty.cc"
+              grep -F -n "desktop_capture" "$BACKEND_MK" || true
+              exit 1
+            fi
 
-          echo "Configured Gecko backend uses the iOS-safe empty desktop capturer"
+            echo "Generated backend selected the iOS-safe empty desktop capturer"
+          else
+            echo "backend.mk was not generated; source-level selection already verified"
+          fi
 
       - name: Build Gecko for iOS
         shell: bash
