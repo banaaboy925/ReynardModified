@@ -1,0 +1,361 @@
+name: Build Reynard H264 IPA and TIPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reynard-h264-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26-intel
+    timeout-minutes: 360
+
+    env:
+      XCODE_VERSION: "26.6"
+      CARGO_TERM_COLOR: always
+      MOZBUILD_STATE_PATH: ${{ github.workspace }}/.mozbuild
+
+    steps:
+      - name: Check out this modified source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Verify modified Reynard source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$(tr -d '\000\r\n ' < engine/release.txt)" = "FIREFOX_153_0_RELEASE"
+          test -f patches/dom/media/webrtc/jsapi/DefaultCodecPreferences.cpp.patch
+          test -f patches/dom/media/webrtc/jsapi/DefaultCodecPreferences.h.patch
+          test -f patches/dom/media/webrtc/jsep/JsepCodecDescription.h.patch
+          test -f patches/modules/libpref/init/StaticPrefList.yaml.patch
+
+          grep -q "ReceivingH264SupportedStatic" \
+            patches/dom/media/webrtc/jsapi/DefaultCodecPreferences.cpp.patch
+          grep -q "SendingH264Supported" \
+            patches/dom/media/webrtc/jsep/JsepCodecDescription.h.patch
+          grep -q "defined(XP_IOS)" \
+            patches/modules/libpref/init/StaticPrefList.yaml.patch
+
+          git rev-parse HEAD
+
+      - name: Select Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          XCODE_PATH="/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
+          test -d "$XCODE_PATH"
+          sudo xcode-select -s "$XCODE_PATH"
+
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          df -h /
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* || true
+          rm -rf "$HOME/Library/Developer/CoreSimulator" || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Restore build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.MOZBUILD_STATE_PATH }}
+            ~/.cargo/registry
+            ~/.cargo/git
+            support/idevice/target
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v1
+          restore-keys: |
+            reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
+
+      - name: Install and verify build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          command -v ldid >/dev/null 2>&1 || brew install ldid
+          brew list lld@19 >/dev/null 2>&1 || brew install lld@19
+          command -v cbindgen >/dev/null 2>&1 || brew install cbindgen
+          brew list wasi-runtimes >/dev/null 2>&1 || brew install wasi-runtimes
+
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-apple-ios
+
+          LLD_BIN="$(brew --prefix lld@19)/bin"
+          BREW_PREFIX="$(brew --prefix)"
+          WASI_CLANG="$(brew --prefix llvm)/bin/clang"
+          WASI_CLANGXX="$(brew --prefix llvm)/bin/clang++"
+          WASI_SYSROOT_DIR="$BREW_PREFIX/share/wasi-sysroot"
+          WASI_RESOURCE_DIR="$BREW_PREFIX/share/wasi-runtimes"
+
+          test -x "$LLD_BIN/ld64.lld"
+          test -x "$WASI_CLANG"
+          test -x "$WASI_CLANGXX"
+          test -d "$WASI_SYSROOT_DIR"
+          test -d "$WASI_RESOURCE_DIR"
+
+          echo "$LLD_BIN" >> "$GITHUB_PATH"
+          export PATH="$LLD_BIN:$PATH"
+
+          export WASM_CC="$WASI_CLANG --target=wasm32-wasi -resource-dir=$WASI_RESOURCE_DIR"
+          export WASM_CXX="$WASI_CLANGXX --target=wasm32-wasi -resource-dir=$WASI_RESOURCE_DIR"
+          export WASI_SYSROOT="$WASI_SYSROOT_DIR"
+
+          {
+            echo "WASM_CC=$WASM_CC"
+            echo "WASM_CXX=$WASM_CXX"
+            echo "WASI_SYSROOT=$WASI_SYSROOT"
+          } >> "$GITHUB_ENV"
+
+          "$LLD_BIN/ld64.lld" --version
+          cbindgen --version
+          rustc --version
+          cargo --version
+
+          TEST_DIR="$RUNNER_TEMP/wasi-test"
+          rm -rf "$TEST_DIR"
+          mkdir -p "$TEST_DIR"
+
+          cat > "$TEST_DIR/test.c" <<'EOF'
+          #include <string.h>
+          int main(void) { return strlen("reynard") == 7 ? 0 : 1; }
+          EOF
+
+          cat > "$TEST_DIR/test.cpp" <<'EOF'
+          #include <cstring>
+          int main() { return std::strlen("reynard") == 7 ? 0 : 1; }
+          EOF
+
+          "$WASI_CLANG" \
+            --target=wasm32-wasi \
+            --sysroot="$WASI_SYSROOT_DIR" \
+            -resource-dir="$WASI_RESOURCE_DIR" \
+            "$TEST_DIR/test.c" \
+            -o "$TEST_DIR/test-c.wasm"
+
+          "$WASI_CLANGXX" \
+            --target=wasm32-wasi \
+            --sysroot="$WASI_SYSROOT_DIR" \
+            -resource-dir="$WASI_RESOURCE_DIR" \
+            "$TEST_DIR/test.cpp" \
+            -o "$TEST_DIR/test-cxx.wasm"
+
+          test -s "$TEST_DIR/test-c.wasm"
+          test -s "$TEST_DIR/test-cxx.wasm"
+          file "$TEST_DIR/test-c.wasm"
+          file "$TEST_DIR/test-cxx.wasm"
+
+      - name: Fetch exact Firefox source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RELEASE_TAG="$(tr -d '\000\r' < engine/release.txt | xargs)"
+          test "$RELEASE_TAG" = "FIREFOX_153_0_RELEASE"
+
+          rm -rf engine/firefox
+
+          git clone \
+            --filter=blob:none \
+            --no-checkout \
+            https://github.com/mozilla-firefox/firefox \
+            engine/firefox
+
+          git -C engine/firefox fetch \
+            --force \
+            --depth 1 \
+            origin \
+            "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+
+          RELEASE_COMMIT="$(git -C engine/firefox rev-list -n 1 "$RELEASE_TAG")"
+          test -n "$RELEASE_COMMIT"
+
+          git -C engine/firefox checkout --detach "$RELEASE_COMMIT"
+          test "$(git -C engine/firefox rev-parse HEAD)" = "$RELEASE_COMMIT"
+
+      - name: Apply Reynard and WebRTC H264 patches
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          firefox = Path("engine/firefox")
+          patches = sorted(Path("patches").rglob("*.patch"))
+          if not patches:
+              raise SystemExit("No Gecko patches were found")
+
+          for patch in patches:
+              absolute = str(patch.resolve())
+              relative = patch.as_posix()
+              print(f"Checking {relative}", flush=True)
+              subprocess.run(
+                  ["git", "-C", str(firefox), "apply", "--check",
+                   "--whitespace=nowarn", absolute],
+                  check=True,
+              )
+              print(f"Applying {relative}", flush=True)
+              subprocess.run(
+                  ["git", "-C", str(firefox), "apply",
+                   "--whitespace=nowarn", absolute],
+                  check=True,
+              )
+          PY
+
+          grep -q "ReceivingH264SupportedStatic" \
+            engine/firefox/dom/media/webrtc/jsapi/DefaultCodecPreferences.cpp
+          grep -q "MediaDataCodec::SupportsDecoderCodec" \
+            engine/firefox/dom/media/webrtc/jsapi/DefaultCodecPreferences.cpp
+          grep -q "SendingH264Supported" \
+            engine/firefox/dom/media/webrtc/jsep/JsepCodecDescription.h
+          grep -q '#if defined(MOZ_WIDGET_ANDROID) || defined(XP_IOS)' \
+            engine/firefox/modules/libpref/init/StaticPrefList.yaml
+
+          git -C engine/firefox diff --stat
+
+      - name: Build idevice support library
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./tools/development/build-idevice.sh
+          test -s browser/Reynard/JIT/RPPairing/libidevice_ffi.a
+          file browser/Reynard/JIT/RPPairing/libidevice_ffi.a
+
+      - name: Preflight Gecko configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export CBINDGEN="$(command -v cbindgen)"
+          test -x "$CBINDGEN"
+          test -n "$WASM_CC"
+          test -n "$WASM_CXX"
+          test -d "$WASI_SYSROOT"
+
+          cat > engine/firefox/.mozconfig <<'EOF'
+          ac_add_options --enable-application=mobile/ios
+          ac_add_options --target=aarch64-apple-ios
+          ac_add_options --enable-ios-target=13.0
+          ac_add_options --enable-webrtc
+          ac_add_options --enable-optimize
+          ac_add_options --disable-debug
+          ac_add_options --disable-tests
+          EOF
+
+          (
+            cd engine/firefox
+            ./mach configure
+          ) 2>&1 | tee "$RUNNER_TEMP/gecko-configure.log"
+
+      - name: Build Gecko for iOS
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export CBINDGEN="$(command -v cbindgen)"
+          ./tools/development/build-gecko.sh \
+            2>&1 | tee "$RUNNER_TEMP/gecko-build.log"
+
+      - name: Validate Gecko output
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          GECKO_BIN="engine/firefox/obj-aarch64-apple-ios/dist/bin"
+          test -s "$GECKO_BIN/XUL"
+
+          shopt -s nullglob
+          DYLIBS=("$GECKO_BIN"/*.dylib)
+          test "${#DYLIBS[@]}" -gt 0
+
+          file "$GECKO_BIN/XUL"
+          ls -lh "$GECKO_BIN/XUL" "${DYLIBS[@]}"
+
+      - name: Archive unsigned Reynard app
+        shell: bash
+        env:
+          REYNARD_CI_UNSIGNED: "1"
+          REYNARD_CODE_SIGN_IDENTITY: "-"
+        run: |
+          set -euo pipefail
+
+          ./tools/release/build-app.sh \
+            2>&1 | tee "$RUNNER_TEMP/xcode-archive.log"
+
+      - name: Create IPA and TrollStore TIPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./tools/release/create-ipa.sh \
+            2>&1 | tee "$RUNNER_TEMP/package.log"
+
+      - name: Validate packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for PACKAGE in \
+            dist/Reynard.ipa \
+            dist/Reynard-TrollStore.tipa \
+            dist/Reynard-Jailbroken.ipa; do
+            test -s "$PACKAGE"
+            unzip -tq "$PACKAGE"
+          done
+
+          unzip -Z1 dist/Reynard-TrollStore.tipa \
+            | grep -q '^Payload/Reynard.app/ptrace_jit$'
+          unzip -Z1 dist/Reynard-TrollStore.tipa \
+            | grep -q '^Payload/Reynard.app/PlugIns/Reynard Helper.appex/Reynard Helper$'
+          unzip -Z1 dist/Reynard-TrollStore.tipa \
+            | grep -q '^Payload/Reynard.app/PlugIns/OpenIn.appex/OpenIn$'
+
+          ls -lh \
+            dist/Reynard.ipa \
+            dist/Reynard-TrollStore.tipa \
+            dist/Reynard-Jailbroken.ipa
+
+      - name: Upload IPA and TIPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Reynard-0.9.0-WebRTC-H264
+          path: |
+            dist/Reynard.ipa
+            dist/Reynard-TrollStore.tipa
+            dist/Reynard-Jailbroken.ipa
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload diagnostic logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Reynard-build-failure-logs-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/gecko-configure.log
+            ${{ runner.temp }}/gecko-build.log
+            ${{ runner.temp }}/xcode-archive.log
+            ${{ runner.temp }}/package.log
+            engine/firefox/obj-aarch64-apple-ios/.mozbuild/logs
+          if-no-files-found: ignore
+          retention-days: 7
