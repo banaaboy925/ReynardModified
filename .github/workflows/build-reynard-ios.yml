@@ -213,16 +213,24 @@ jobs:
 
           test "$(git -C "$IDEVICE_DIR" rev-parse HEAD)" = "$IDEVICE_COMMIT"
 
-          git -C "$IDEVICE_DIR" submodule update \
-            --init \
-            --recursive \
-            --depth 1
-
+          # This idevice revision has a stale ffi/libplist entry in
+          # .gitmodules but no matching gitlink/directory in its tree.
+          # Reynard builds the Rust FFI crate from ffi/Cargo.toml and does not
+          # require that nonexistent submodule.
+          test -f "$IDEVICE_DIR/Cargo.toml"
+          test -f "$IDEVICE_DIR/Cargo.lock"
           test -f "$IDEVICE_DIR/ffi/Cargo.toml"
           test -f "$IDEVICE_DIR/idevice/Cargo.toml"
-          test -d "$IDEVICE_DIR/ffi/libplist"
 
-          echo "Fetched Reynard 0.9.0 idevice source at $IDEVICE_COMMIT"
+          cargo metadata \
+            --manifest-path "$IDEVICE_DIR/ffi/Cargo.toml" \
+            --no-deps \
+            --format-version 1 \
+            > "$RUNNER_TEMP/idevice-metadata.json"
+
+          grep -q '"name":"idevice-ffi"'             "$RUNNER_TEMP/idevice-metadata.json"
+
+          echo "Fetched and validated Reynard 0.9.0 idevice source at $IDEVICE_COMMIT"
 
       - name: Restore build caches
         uses: actions/cache@v4
@@ -232,7 +240,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             support/idevice/target
-          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v6-idevice-and-packaging
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v7-idevice-tree-fix
           restore-keys: |
             reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
 
