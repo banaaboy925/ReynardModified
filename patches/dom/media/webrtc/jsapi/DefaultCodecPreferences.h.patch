@@ -1,0 +1,32 @@
+diff --git a/dom/media/webrtc/jsapi/DefaultCodecPreferences.h b/dom/media/webrtc/jsapi/DefaultCodecPreferences.h
+--- a/dom/media/webrtc/jsapi/DefaultCodecPreferences.h
++++ b/dom/media/webrtc/jsapi/DefaultCodecPreferences.h
+@@ -36,6 +36,9 @@ class DefaultCodecPreferences final : public JsepCodecPreferences {
+   bool AV1Enabled() const override { return mAV1Enabled; }
+   bool AV1Preferred() const override { return mAV1Preferred; }
+   bool H264Enabled() const override { return mH264Enabled; }
++  bool SendingH264Supported() const override {
++    return mSendingH264Supported;
++  }
+ 
+   bool SoftwareH264Enabled() const override { return mSoftwareH264Enabled; }
+   bool HardwareH264Enabled() const { return mHardwareH264Enabled; }
+@@ -82,6 +85,10 @@ class DefaultCodecPreferences final : public JsepCodecPreferences {
+ 
+   static bool H264EnabledStatic();
+ 
++  static bool SendingH264SupportedStatic();
++
++  static bool ReceivingH264SupportedStatic();
++
+   static bool SoftwareH264EnabledStatic();
+ 
+   static bool HardwareH264EnabledStatic();
+@@ -123,6 +130,7 @@ class DefaultCodecPreferences final : public JsepCodecPreferences {
+   const bool mAV1Enabled = AV1EnabledStatic();
+   const bool mAV1Preferred = AV1PreferredStatic();
+   const bool mH264Enabled = H264EnabledStatic();
++  const bool mSendingH264Supported = SendingH264SupportedStatic();
+   const bool mSoftwareH264Enabled = SoftwareH264EnabledStatic();
+   const bool mHardwareH264Enabled = HardwareH264EnabledStatic();
+   const bool mSendingH264PacketizationModeZeroSupported =

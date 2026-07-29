@@ -1,0 +1,14 @@
+diff --git a/gfx/layers/wr/WebRenderBridgeParent.cpp b/gfx/layers/wr/WebRenderBridgeParent.cpp
+index 802cb7cfa8e1..b386e350a777 100644
+--- a/gfx/layers/wr/WebRenderBridgeParent.cpp
++++ b/gfx/layers/wr/WebRenderBridgeParent.cpp
+@@ -776,7 +776,8 @@ bool WebRenderBridgeParent::UpdateResources(
+ 
+         wr::Vec<uint8_t> bytes;
+         if (reader.Read(op.bytes(), bytes)) {
+-          aUpdates.AddFontDescriptor(op.key(), bytes, op.fontIndex());
++          aUpdates.AddFontDescriptor(op.key(), bytes, op.fontIndex(),
++                                     op.isSystemFont(), op.systemFontTraits());
+         } else {
+           gfxCriticalNote << "TOpAddFontDescriptor failed";
+           success = false;

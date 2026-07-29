@@ -1,0 +1,24 @@
+diff --git a/dom/media/webrtc/jsep/JsepCodecDescription.h b/dom/media/webrtc/jsep/JsepCodecDescription.h
+--- a/dom/media/webrtc/jsep/JsepCodecDescription.h
++++ b/dom/media/webrtc/jsep/JsepCodecDescription.h
+@@ -26,6 +26,10 @@ class JsepCodecPreferences {
+   virtual bool AV1Enabled() const = 0;
+   virtual bool AV1Preferred() const = 0;
+   virtual bool H264Enabled() const = 0;
++  // A decoder-only implementation may expose H.264 through receiver
++  // capabilities without claiming that RTCRtpSender can encode it.
++  virtual bool SendingH264Supported() const { return H264Enabled(); }
++
+   virtual bool SoftwareH264Enabled() const = 0;
+   virtual bool SendingH264PacketizationModeZeroSupported() const = 0;
+   virtual bool H264BaselineDisabled() const = 0;
+@@ -594,6 +598,9 @@ class JsepVideoCodecDescription final : public JsepCodecDescription {
+       aCodec->mProfileLevelId &= 0xFFFF00;
+       aCodec->mProfileLevelId |= aPrefs.H264Level();
+     }
++    if (!aPrefs.SendingH264Supported()) {
++      aCodec->mSupportedDirection &= sdp::kRecv;
++    }
+     aCodec->mConstraints.maxBr = aPrefs.H264MaxBr();
+     aCodec->mConstraints.maxMbps = aPrefs.H264MaxMbps();
+     return ConfigureCommonVideoCodec(std::move(aCodec), aPrefs);
