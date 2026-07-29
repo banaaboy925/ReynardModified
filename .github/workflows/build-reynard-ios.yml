@@ -240,7 +240,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             support/idevice/target
-          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v10-direct-desktop-branch
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v11-remove-false-backend-gate
           restore-keys: |
             reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
 
@@ -793,27 +793,20 @@ jobs:
           GECKO_OBJ="engine/firefox/obj-aarch64-apple-ios"
           test -d "$GECKO_OBJ"
 
-          # backend.mk is the useful generated source list when present.
-          # Do not scan the entire object tree, because configuration caches can
-          # mention source-tree filenames that are not selected for compilation.
-          BACKEND_MK="$GECKO_OBJ/dom/media/systemservices/backend.mk"
-          if [ -f "$BACKEND_MK" ]; then
-            if grep -F -q "video_engine/desktop_capture_impl.cc" "$BACKEND_MK"; then
-              echo "::error::Generated backend selected macOS desktop_capture_impl.cc"
-              grep -F -n "desktop_capture" "$BACKEND_MK" || true
-              exit 1
-            fi
-
-            if ! grep -F -q "video_engine/desktop_capture_impl_empty.cc" "$BACKEND_MK"; then
-              echo "::error::Generated backend omitted desktop_capture_impl_empty.cc"
-              grep -F -n "desktop_capture" "$BACKEND_MK" || true
-              exit 1
-            fi
-
-            echo "Generated backend selected the iOS-safe empty desktop capturer"
-          else
-            echo "backend.mk was not generated; source-level selection already verified"
+          # Mozilla's backend.mk records generated unified object files rather
+          # than every original C++ source filename. Therefore it is not valid
+          # to require desktop_capture_impl_empty.cc to appear there.
+          #
+          # Keep this as non-fatal diagnostics only. The source-level checks
+          # above already prove the macOS implementation was removed, and the
+          # actual Gecko compile is the authoritative validation.
+          SYSTEMSERVICES_OBJ="$GECKO_OBJ/dom/media/systemservices"
+          if [ -d "$SYSTEMSERVICES_OBJ" ]; then
+            echo "Generated systemservices desktop-capture references:"
+            grep -R -F -n "desktop_capture_impl"               "$SYSTEMSERVICES_OBJ" | head -50 || true
           fi
+
+          echo "Gecko configure completed; continuing to the real compilation"
 
       - name: Build Gecko for iOS
         shell: bash
