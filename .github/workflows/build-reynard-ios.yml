@@ -79,7 +79,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             support/idevice/target
-          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v1
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v2-wasi-libc
           restore-keys: |
             reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
 
@@ -91,6 +91,9 @@ jobs:
           command -v ldid >/dev/null 2>&1 || brew install ldid
           brew list lld@19 >/dev/null 2>&1 || brew install lld@19
           command -v cbindgen >/dev/null 2>&1 || brew install cbindgen
+          # wasi-runtimes provides compiler-rt/libc++, while wasi-libc
+          # provides the C headers and libc used by Firefox's WASI checks.
+          brew list wasi-libc >/dev/null 2>&1 || brew install wasi-libc
           brew list wasi-runtimes >/dev/null 2>&1 || brew install wasi-runtimes
 
           rustup toolchain install stable --profile minimal
@@ -110,11 +113,18 @@ jobs:
           test -d "$WASI_SYSROOT_DIR"
           test -d "$WASI_RESOURCE_DIR"
 
+          # Verify that both the C and C++ WASI headers are actually linked
+          # into Homebrew's shared sysroot before spending time on Gecko.
+          find "$WASI_SYSROOT_DIR/include" -name string.h -print -quit | grep -q .
+          find "$WASI_SYSROOT_DIR/include" -name cstring -print -quit | grep -q .
+
           echo "$LLD_BIN" >> "$GITHUB_PATH"
           export PATH="$LLD_BIN:$PATH"
 
-          export WASM_CC="$WASI_CLANG --target=wasm32-wasi -resource-dir=$WASI_RESOURCE_DIR"
-          export WASM_CXX="$WASI_CLANGXX --target=wasm32-wasi -resource-dir=$WASI_RESOURCE_DIR"
+          # Firefox adds the correct WebAssembly target itself. LLVM 22
+          # maps Firefox's wasm32-wasi target to wasm32-wasip1.
+          export WASM_CC="$WASI_CLANG"
+          export WASM_CXX="$WASI_CLANGXX"
           export WASI_SYSROOT="$WASI_SYSROOT_DIR"
 
           {
@@ -143,16 +153,14 @@ jobs:
           EOF
 
           "$WASI_CLANG" \
-            --target=wasm32-wasi \
+            --target=wasm32-wasip1 \
             --sysroot="$WASI_SYSROOT_DIR" \
-            -resource-dir="$WASI_RESOURCE_DIR" \
             "$TEST_DIR/test.c" \
             -o "$TEST_DIR/test-c.wasm"
 
           "$WASI_CLANGXX" \
-            --target=wasm32-wasi \
+            --target=wasm32-wasip1 \
             --sysroot="$WASI_SYSROOT_DIR" \
-            -resource-dir="$WASI_RESOURCE_DIR" \
             "$TEST_DIR/test.cpp" \
             -o "$TEST_DIR/test-cxx.wasm"
 
