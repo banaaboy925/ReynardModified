@@ -63,6 +63,110 @@ jobs:
 
           git rev-parse HEAD
 
+      - name: Prepare certificate-free packaging scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: Path, old: str, new: str, label: str) -> None:
+              source = path.read_text()
+              if new in source:
+                  print(f"{label}: already prepared", flush=True)
+                  return
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(
+                      f"{label}: expected one source anchor, found {count}"
+                  )
+              path.write_text(source.replace(old, new, 1))
+              print(f"{label}: prepared", flush=True)
+
+          add_gecko = Path("browser/Scripts/AddGecko.sh")
+          replace_once(
+              add_gecko,
+              'SIGN_IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY:-'
+              '${EXPANDED_CODE_SIGN_IDENTITY_NAME:-Apple Development}}"',
+              'SIGN_IDENTITY="${REYNARD_CODE_SIGN_IDENTITY:-'
+              '${EXPANDED_CODE_SIGN_IDENTITY:-'
+              '${EXPANDED_CODE_SIGN_IDENTITY_NAME:-Apple Development}}}"',
+              "AddGecko ad-hoc identity override",
+          )
+
+          build_app = Path("tools/release/build-app.sh")
+          replace_once(
+              build_app,
+              '''xcodebuild archive -scheme "Reynard" -archivePath "$DIST_DIR/Reynard.xcarchive" -project "$PROJECT_PATH" -sdk iphoneos -arch arm64 -configuration Release -xcconfig "$DIST_DIR/Reynard.xcconfig"
+          ''',
+              '''set --
+          if [ "${REYNARD_CI_UNSIGNED:-0}" = "1" ]; then
+            set -- \\
+              CODE_SIGNING_ALLOWED=NO \\
+              CODE_SIGNING_REQUIRED=NO \\
+              CODE_SIGN_STYLE=Manual \\
+              CODE_SIGN_IDENTITY= \\
+              DEVELOPMENT_TEAM= \\
+              PROVISIONING_PROFILE_SPECIFIER=
+          fi
+
+          xcodebuild archive \\
+            -scheme "Reynard" \\
+            -archivePath "$DIST_DIR/Reynard.xcarchive" \\
+            -project "$PROJECT_PATH" \\
+            -sdk iphoneos \\
+            -arch arm64 \\
+            -configuration Release \\
+            -xcconfig "$DIST_DIR/Reynard.xcconfig" \\
+            "$@"
+          ''',
+              "unsigned Xcode archive mode",
+          )
+
+          create_ipa = Path("tools/release/create-ipa.sh")
+          replace_once(
+              create_ipa,
+              '''rm -rf "$WORK_DIR" "$ROOT_DIR/dist/Reynard.ipa" "$ROOT_DIR/dist/Reynard-TrollStore.ipa"
+          ''',
+              '''rm -rf "$WORK_DIR" "$ROOT_DIR/dist/Reynard.ipa" "$ROOT_DIR/dist/Reynard-TrollStore.tipa" "$ROOT_DIR/dist/Reynard-Jailbroken.ipa"
+          ''',
+              "TIPA cleanup names",
+          )
+
+          replace_once(
+              create_ipa,
+              '''chmod 0755 "$PTRACE_JIT_OUT"
+          ldid -S"$ROOT_DIR/browser/Reynard/JIT/Unsandboxed/ptrace_jit.entitlements" "$PTRACE_JIT_OUT"
+          ldid -S"$ROOT_DIR/browser/Reynard/Entitlements/Reynard.private.entitlements" "Payload/Reynard.app/Reynard"
+          ldid -S"$ROOT_DIR/browser/Helper/Entitlements/Reynard-Helper.private.entitlements" "Payload/Reynard.app/PlugIns/Reynard Helper.appex/Reynard Helper"
+          zip -r ../Reynard-TrollStore.tipa Payload -x "._*" -x ".DS_Store" -x "__MACOSX" # trollstore ipa
+          ''',
+              '''chmod 0755 "$PTRACE_JIT_OUT"
+
+          # Sign nested executables first, then the main app executable.
+          ldid -S"$ROOT_DIR/browser/Reynard/JIT/Unsandboxed/ptrace_jit.entitlements" "$PTRACE_JIT_OUT"
+          ldid -S "Payload/Reynard.app/PlugIns/OpenIn.appex/OpenIn"
+          ldid -S"$ROOT_DIR/browser/Helper/Entitlements/Reynard-Helper.private.entitlements" "Payload/Reynard.app/PlugIns/Reynard Helper.appex/Reynard Helper"
+          ldid -S"$ROOT_DIR/browser/Reynard/Entitlements/Reynard.private.entitlements" "Payload/Reynard.app/Reynard"
+          zip -r ../Reynard-TrollStore.tipa Payload -x "._*" -x ".DS_Store" -x "__MACOSX" # trollstore ipa
+          ''',
+              "nested TIPA signing",
+          )
+          PY
+
+          grep -q 'REYNARD_CODE_SIGN_IDENTITY' browser/Scripts/AddGecko.sh
+          grep -q 'REYNARD_CI_UNSIGNED' tools/release/build-app.sh
+          grep -q 'OpenIn.appex/OpenIn' tools/release/create-ipa.sh
+          grep -q 'Reynard-TrollStore.tipa' tools/release/create-ipa.sh
+
+          chmod 0755 \
+            browser/Scripts/AddGecko.sh \
+            tools/release/build-app.sh \
+            tools/release/create-ipa.sh
+
+          echo "Certificate-free packaging scripts verified"
+
       - name: Select Xcode
         shell: bash
         run: |
@@ -87,6 +191,39 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/CodeQL || true
           df -h /
 
+      - name: Fetch exact idevice support source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IDEVICE_COMMIT="92323d1262598cfcb31aa54ef94c26bb26c5c7a0"
+          IDEVICE_DIR="support/idevice"
+
+          rm -rf "$IDEVICE_DIR"
+          mkdir -p "$IDEVICE_DIR"
+
+          git -C "$IDEVICE_DIR" init
+          git -C "$IDEVICE_DIR" remote add origin \
+            https://github.com/jkcoxson/idevice
+          git -C "$IDEVICE_DIR" fetch \
+            --depth 1 \
+            origin \
+            "$IDEVICE_COMMIT"
+          git -C "$IDEVICE_DIR" checkout --detach FETCH_HEAD
+
+          test "$(git -C "$IDEVICE_DIR" rev-parse HEAD)" = "$IDEVICE_COMMIT"
+
+          git -C "$IDEVICE_DIR" submodule update \
+            --init \
+            --recursive \
+            --depth 1
+
+          test -f "$IDEVICE_DIR/ffi/Cargo.toml"
+          test -f "$IDEVICE_DIR/idevice/Cargo.toml"
+          test -d "$IDEVICE_DIR/ffi/libplist"
+
+          echo "Fetched Reynard 0.9.0 idevice source at $IDEVICE_COMMIT"
+
       - name: Restore build caches
         uses: actions/cache@v4
         with:
@@ -95,7 +232,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             support/idevice/target
-          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v5-script-permissions
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v6-idevice-and-packaging
           restore-keys: |
             reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
 
@@ -511,7 +648,12 @@ jobs:
         run: |
           set -euo pipefail
 
+          IDEVICE_COMMIT="92323d1262598cfcb31aa54ef94c26bb26c5c7a0"
+          test -d support/idevice/.git
+          test "$(git -C support/idevice rev-parse HEAD)" = "$IDEVICE_COMMIT"
+
           bash ./tools/development/build-idevice.sh
+
           test -s browser/Reynard/JIT/RPPairing/libidevice_ffi.a
           file browser/Reynard/JIT/RPPairing/libidevice_ffi.a
 
