@@ -240,7 +240,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             support/idevice/target
-          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v8-ios-desktop-capture
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v9-structural-desktop-capture
           restore-keys: |
             reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
 
@@ -638,13 +638,81 @@ jobs:
               print("iOS H264 preference: already present", flush=True)
 
           systemservices = firefox / "dom/media/systemservices/moz.build"
-          replace_once(
-              systemservices,
-              'if CONFIG["OS_TARGET"] == "Android" or '
-              'CONFIG["MOZ_WIDGET_TOOLKIT"] == "uikit":',
-              'if CONFIG["OS_TARGET"] == "Android" or '
-              'CONFIG["TARGET_OS"] == "iOS":',
-              "iOS empty desktop capture selection",
+          systemservices_text = systemservices.read_text()
+
+          empty_marker = '"video_engine/desktop_capture_impl_empty.cc"'
+          mac_marker = '"video_engine/desktop_capture_impl.cc"'
+          next_block_marker = '    if "WEBRTC_USE_PIPEWIRE" in DEFINES:'
+
+          empty_pos = systemservices_text.find(empty_marker)
+          mac_pos = systemservices_text.find(mac_marker)
+
+          if empty_pos < 0:
+              raise SystemExit(
+                  "The patched moz.build does not contain the empty "
+                  "desktop-capture implementation"
+              )
+          if mac_pos < 0:
+              raise SystemExit(
+                  "The patched moz.build does not contain the macOS "
+                  "desktop-capture implementation"
+              )
+
+          block_start = systemservices_text.rfind(
+              "\n    if ", 0, empty_pos
+          )
+          block_end = systemservices_text.find(
+              "\n" + next_block_marker, mac_pos
+          )
+
+          if block_start < 0 or block_end < 0 or block_start >= block_end:
+              raise SystemExit(
+                  "Could not locate the desktop-capture source-selection block"
+              )
+
+          block_start += 1
+          replacement_block = "\n".join(
+              [
+                  "    # This source tree is configured only for",
+                  "    # Reynard's iOS build. Desktop screen capture is",
+                  "    # unavailable here, so use Firefox's empty",
+                  "    # implementation instead of the macOS implementation.",
+                  "    UNIFIED_SOURCES += [",
+                  '        "EmptyDesktopCapturer.cpp",',
+                  '        "video_engine/desktop_capture_impl_empty.cc",',
+                  "    ]",
+                  "",
+              ]
+          )
+
+          systemservices_text = (
+              systemservices_text[:block_start]
+              + replacement_block
+              + systemservices_text[block_end + 1 :]
+          )
+          systemservices.write_text(systemservices_text)
+
+          final_text = systemservices.read_text()
+          if final_text.count(empty_marker) != 1:
+              raise SystemExit(
+                  "Expected exactly one empty desktop-capture source"
+              )
+          if mac_marker in final_text:
+              raise SystemExit(
+                  "macOS desktop_capture_impl.cc remains in the iOS build file"
+              )
+          if '"video_engine/tab_capturer.cc"' in final_text:
+              raise SystemExit(
+                  "macOS tab_capturer.cc remains in the iOS build file"
+              )
+          if '"video_engine/desktop_device_info.cc"' in final_text:
+              raise SystemExit(
+                  "macOS desktop_device_info.cc remains in the iOS build file"
+              )
+
+          print(
+              "iOS empty desktop-capture block structurally rewritten",
+              flush=True,
           )
           PY
 
@@ -656,12 +724,18 @@ jobs:
             engine/firefox/dom/media/webrtc/jsep/JsepCodecDescription.h
           grep -q '#if defined(MOZ_WIDGET_ANDROID) || defined(XP_IOS)' \
             engine/firefox/modules/libpref/init/StaticPrefList.yaml
-          grep -q 'CONFIG\["TARGET_OS"\] == "iOS"' \
-            engine/firefox/dom/media/systemservices/moz.build
           grep -q '"video_engine/desktop_capture_impl_empty.cc"' \
+            engine/firefox/dom/media/systemservices/moz.build
+          ! grep -q '"video_engine/desktop_capture_impl.cc"' \
+            engine/firefox/dom/media/systemservices/moz.build
+          ! grep -q '"video_engine/tab_capturer.cc"' \
+            engine/firefox/dom/media/systemservices/moz.build
+          ! grep -q '"video_engine/desktop_device_info.cc"' \
             engine/firefox/dom/media/systemservices/moz.build
 
           echo "WebRTC H264 and iOS desktop-capture source selection verified"
+          sed -n '/This source tree is configured only for/,+8p' \
+            engine/firefox/dom/media/systemservices/moz.build
           sed -n '1,65p' \
             engine/firefox/dom/media/webrtc/jsapi/DefaultCodecPreferences.cpp
 
@@ -713,21 +787,21 @@ jobs:
             ./mach configure
           ) 2>&1 | tee "$RUNNER_TEMP/gecko-configure.log"
 
-          SYSTEMSERVICES_OBJ="engine/firefox/obj-aarch64-apple-ios/dom/media/systemservices"
-          test -d "$SYSTEMSERVICES_OBJ"
+          GECKO_OBJ="engine/firefox/obj-aarch64-apple-ios"
+          test -d "$GECKO_OBJ"
 
           if grep -R -F -q "video_engine/desktop_capture_impl.cc" \
-              "$SYSTEMSERVICES_OBJ"; then
+              "$GECKO_OBJ"; then
             echo "::error::Configured iOS build still contains macOS desktop_capture_impl.cc"
             grep -R -F -n "video_engine/desktop_capture_impl.cc" \
-              "$SYSTEMSERVICES_OBJ" | head -20 || true
+              "$GECKO_OBJ" | head -20 || true
             exit 1
           fi
 
           if ! grep -R -F -q "video_engine/desktop_capture_impl_empty.cc" \
-              "$SYSTEMSERVICES_OBJ"; then
+              "$GECKO_OBJ"; then
             echo "::error::Configured iOS build did not select desktop_capture_impl_empty.cc"
-            find "$SYSTEMSERVICES_OBJ" -maxdepth 2 -type f -print | sort
+            grep -R -F -n "desktop_capture" "$GECKO_OBJ" | head -50 || true
             exit 1
           fi
 
