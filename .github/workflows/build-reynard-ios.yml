@@ -240,7 +240,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             support/idevice/target
-          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v7-idevice-tree-fix
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v8-ios-desktop-capture
           restore-keys: |
             reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
 
@@ -636,6 +636,16 @@ jobs:
               print("iOS H264 preference: applied", flush=True)
           else:
               print("iOS H264 preference: already present", flush=True)
+
+          systemservices = firefox / "dom/media/systemservices/moz.build"
+          replace_once(
+              systemservices,
+              'if CONFIG["OS_TARGET"] == "Android" or '
+              'CONFIG["MOZ_WIDGET_TOOLKIT"] == "uikit":',
+              'if CONFIG["OS_TARGET"] == "Android" or '
+              'CONFIG["TARGET_OS"] == "iOS":',
+              "iOS empty desktop capture selection",
+          )
           PY
 
           grep -q "ReceivingH264SupportedStatic" \
@@ -646,8 +656,12 @@ jobs:
             engine/firefox/dom/media/webrtc/jsep/JsepCodecDescription.h
           grep -q '#if defined(MOZ_WIDGET_ANDROID) || defined(XP_IOS)' \
             engine/firefox/modules/libpref/init/StaticPrefList.yaml
+          grep -q 'CONFIG\["TARGET_OS"\] == "iOS"' \
+            engine/firefox/dom/media/systemservices/moz.build
+          grep -q '"video_engine/desktop_capture_impl_empty.cc"' \
+            engine/firefox/dom/media/systemservices/moz.build
 
-          echo "WebRTC H264 source registration verified"
+          echo "WebRTC H264 and iOS desktop-capture source selection verified"
           sed -n '1,65p' \
             engine/firefox/dom/media/webrtc/jsapi/DefaultCodecPreferences.cpp
 
@@ -698,6 +712,26 @@ jobs:
             cd engine/firefox
             ./mach configure
           ) 2>&1 | tee "$RUNNER_TEMP/gecko-configure.log"
+
+          SYSTEMSERVICES_OBJ="engine/firefox/obj-aarch64-apple-ios/dom/media/systemservices"
+          test -d "$SYSTEMSERVICES_OBJ"
+
+          if grep -R -F -q "video_engine/desktop_capture_impl.cc" \
+              "$SYSTEMSERVICES_OBJ"; then
+            echo "::error::Configured iOS build still contains macOS desktop_capture_impl.cc"
+            grep -R -F -n "video_engine/desktop_capture_impl.cc" \
+              "$SYSTEMSERVICES_OBJ" | head -20 || true
+            exit 1
+          fi
+
+          if ! grep -R -F -q "video_engine/desktop_capture_impl_empty.cc" \
+              "$SYSTEMSERVICES_OBJ"; then
+            echo "::error::Configured iOS build did not select desktop_capture_impl_empty.cc"
+            find "$SYSTEMSERVICES_OBJ" -maxdepth 2 -type f -print | sort
+            exit 1
+          fi
+
+          echo "Configured Gecko backend uses the iOS-safe empty desktop capturer"
 
       - name: Build Gecko for iOS
         shell: bash
