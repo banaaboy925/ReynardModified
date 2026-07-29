@@ -27,6 +27,22 @@ jobs:
           fetch-depth: 0
           submodules: false
 
+      - name: Restore Unix script permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Zip extraction and Windows commits can lose executable mode bits.
+          find tools browser -type f -name '*.sh' -exec chmod 0755 {} +
+
+          test -x tools/development/build-idevice.sh
+          test -x tools/development/build-gecko.sh
+          test -x tools/release/build-app.sh
+          test -x tools/release/create-ipa.sh
+          test -x browser/Scripts/AddGecko.sh
+
+          echo "Shell script permissions restored"
+
       - name: Verify modified Reynard source
         shell: bash
         run: |
@@ -79,16 +95,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             support/idevice/target
-          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v4-direct-h264-edits
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v5-script-permissions
           restore-keys: |
             reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
 
       - name: Restore Firefox 153 source archive
-        uses: actions/cache@v4
+        id: firefox-source-cache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/reynard/firefox-153.0.source.tar.xz
           key: firefox-153.0-source-20260720-v1
-          save-always: true
 
       - name: Install and verify build tools
         shell: bash
@@ -266,6 +282,13 @@ jobs:
 
           echo "Extracted official Firefox 153.0 source"
           du -sh engine/firefox
+
+      - name: Save Firefox 153 source archive
+        if: steps.firefox-source-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/reynard/firefox-153.0.source.tar.xz
+          key: firefox-153.0-source-20260720-v1
 
       - name: Apply Reynard patches and register WebRTC H264
         shell: bash
@@ -488,7 +511,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          ./tools/development/build-idevice.sh
+          bash ./tools/development/build-idevice.sh
           test -s browser/Reynard/JIT/RPPairing/libidevice_ffi.a
           file browser/Reynard/JIT/RPPairing/libidevice_ffi.a
 
@@ -532,7 +555,7 @@ jobs:
           set -euo pipefail
 
           export CBINDGEN="$(command -v cbindgen)"
-          ./tools/development/build-gecko.sh \
+          bash ./tools/development/build-gecko.sh \
             2>&1 | tee "$RUNNER_TEMP/gecko-build.log"
 
       - name: Validate Gecko output
@@ -558,7 +581,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          ./tools/release/build-app.sh \
+          bash ./tools/release/build-app.sh \
             2>&1 | tee "$RUNNER_TEMP/xcode-archive.log"
 
       - name: Create IPA and TrollStore TIPA
@@ -566,7 +589,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          ./tools/release/create-ipa.sh \
+          bash ./tools/release/create-ipa.sh \
             2>&1 | tee "$RUNNER_TEMP/package.log"
 
       - name: Validate packages
