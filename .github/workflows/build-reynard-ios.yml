@@ -79,9 +79,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             support/idevice/target
-          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v3-merged-wasi-sysroot
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v4-direct-h264-edits
           restore-keys: |
             reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
+
+      - name: Restore Firefox 153 source archive
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/reynard/firefox-153.0.source.tar.xz
+          key: firefox-153.0-source-20260720-v1
+          save-always: true
 
       - name: Install and verify build tools
         shell: bash
@@ -209,27 +216,58 @@ jobs:
           RELEASE_TAG="$(tr -d '\000\r' < engine/release.txt | xargs)"
           test "$RELEASE_TAG" = "FIREFOX_153_0_RELEASE"
 
+          CACHE_DIR="$HOME/.cache/reynard"
+          ARCHIVE="$CACHE_DIR/firefox-153.0.source.tar.xz"
+          ARCHIVE_URL="https://ftp.mozilla.org/pub/firefox/releases/153.0/source/firefox-153.0.source.tar.xz"
+          SUMS_URL="https://ftp.mozilla.org/pub/firefox/releases/153.0/SHA256SUMS"
+          SUMS_FILE="$RUNNER_TEMP/firefox-153.0-SHA256SUMS"
+
+          mkdir -p "$CACHE_DIR"
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            "$SUMS_URL" -o "$SUMS_FILE"
+
+          EXPECTED_HASH="$(
+            awk '$2 == "source/firefox-153.0.source.tar.xz" { print $1 }' \
+              "$SUMS_FILE"
+          )"
+          test -n "$EXPECTED_HASH"
+
+          verify_archive() {
+            test -s "$ARCHIVE" || return 1
+            ACTUAL_HASH="$(shasum -a 256 "$ARCHIVE" | awk '{ print $1 }')"
+            test "$ACTUAL_HASH" = "$EXPECTED_HASH"
+          }
+
+          if ! verify_archive; then
+            rm -f "$ARCHIVE"
+            curl --fail --location \
+              --retry 5 --retry-all-errors \
+              --continue-at - \
+              "$ARCHIVE_URL" -o "$ARCHIVE"
+          fi
+
+          if ! verify_archive; then
+            echo "::error::Firefox source archive checksum verification failed"
+            rm -f "$ARCHIVE"
+            exit 1
+          fi
+
           rm -rf engine/firefox
+          mkdir -p engine/firefox
 
-          git clone \
-            --filter=blob:none \
-            --no-checkout \
-            https://github.com/mozilla-firefox/firefox \
-            engine/firefox
+          tar -xJf "$ARCHIVE" \
+            --strip-components=1 \
+            -C engine/firefox
 
-          git -C engine/firefox fetch \
-            --force \
-            --depth 1 \
-            origin \
-            "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test -f engine/firefox/mach
+          test -f engine/firefox/dom/media/webrtc/jsapi/DefaultCodecPreferences.cpp
+          test -f engine/firefox/dom/media/webrtc/jsep/JsepCodecDescription.h
 
-          RELEASE_COMMIT="$(git -C engine/firefox rev-list -n 1 "$RELEASE_TAG")"
-          test -n "$RELEASE_COMMIT"
+          echo "Extracted official Firefox 153.0 source"
+          du -sh engine/firefox
 
-          git -C engine/firefox checkout --detach "$RELEASE_COMMIT"
-          test "$(git -C engine/firefox rev-parse HEAD)" = "$RELEASE_COMMIT"
-
-      - name: Apply Reynard and WebRTC H264 patches
+      - name: Apply Reynard patches and register WebRTC H264
         shell: bash
         run: |
           set -euo pipefail
@@ -239,9 +277,20 @@ jobs:
           import subprocess
 
           firefox = Path("engine/firefox")
-          patches = sorted(Path("patches").rglob("*.patch"))
+
+          direct_edit_patches = {
+              Path("patches/dom/media/webrtc/jsapi/DefaultCodecPreferences.cpp.patch"),
+              Path("patches/dom/media/webrtc/jsapi/DefaultCodecPreferences.h.patch"),
+              Path("patches/dom/media/webrtc/jsep/JsepCodecDescription.h.patch"),
+          }
+
+          patches = [
+              patch
+              for patch in sorted(Path("patches").rglob("*.patch"))
+              if patch not in direct_edit_patches
+          ]
           if not patches:
-              raise SystemExit("No Gecko patches were found")
+              raise SystemExit("No Reynard Gecko patches were found")
 
           for patch in patches:
               absolute = str(patch.resolve())
@@ -258,6 +307,167 @@ jobs:
                    "--whitespace=nowarn", absolute],
                   check=True,
               )
+
+          def replace_once(path: Path, old: str, new: str, label: str) -> None:
+              source = path.read_text()
+              if new in source:
+                  print(f"{label}: already present", flush=True)
+                  return
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(
+                      f"{label}: expected one source anchor, found {count}"
+                  )
+              path.write_text(source.replace(old, new, 1))
+              print(f"{label}: applied", flush=True)
+
+          cpp = firefox / "dom/media/webrtc/jsapi/DefaultCodecPreferences.cpp"
+          header = firefox / "dom/media/webrtc/jsapi/DefaultCodecPreferences.h"
+          jsep = firefox / "dom/media/webrtc/jsep/JsepCodecDescription.h"
+          prefs = firefox / "modules/libpref/init/StaticPrefList.yaml"
+
+          replace_once(
+              cpp,
+              '#include "gmp/GMPUtils.h"\n'
+              '#include "libwebrtcglue/VideoConduit.h"',
+              '#include "gmp/GMPUtils.h"\n'
+              '#include "libwebrtcglue/MediaDataCodec.h"\n'
+              '#include "libwebrtcglue/VideoConduit.h"',
+              "MediaDataCodec include",
+          )
+
+          replace_once(
+              cpp,
+              '''bool DefaultCodecPreferences::H264EnabledStatic() {
+            return SoftwareH264EnabledStatic() || HardwareH264EnabledStatic();
+          }
+          ''',
+              '''bool DefaultCodecPreferences::H264EnabledStatic() {
+            return SendingH264SupportedStatic() ||
+                   ReceivingH264SupportedStatic();
+          }
+
+          bool DefaultCodecPreferences::SendingH264SupportedStatic() {
+          #ifdef XP_IOS
+            const webrtc::SdpVideoFormat h264Format("H264");
+            return !MediaDataCodec::SupportsEncoderCodec(h264Format).isEmpty();
+          #else
+            return SoftwareH264EnabledStatic() || HardwareH264EnabledStatic();
+          #endif
+          }
+
+          bool DefaultCodecPreferences::ReceivingH264SupportedStatic() {
+          #ifdef XP_IOS
+            return !MediaDataCodec::SupportsDecoderCodec(
+                        webrtc::VideoCodecType::kVideoCodecH264)
+                        .isEmpty();
+          #else
+            return SoftwareH264EnabledStatic() || HardwareH264EnabledStatic();
+          #endif
+          }
+          ''',
+              "direction-specific H264 support",
+          )
+
+          replace_once(
+              header,
+              '''  bool H264Enabled() const override { return mH264Enabled; }
+
+            bool SoftwareH264Enabled() const override { return mSoftwareH264Enabled; }
+          ''',
+              '''  bool H264Enabled() const override { return mH264Enabled; }
+            bool SendingH264Supported() const override {
+              return mSendingH264Supported;
+            }
+
+            bool SoftwareH264Enabled() const override { return mSoftwareH264Enabled; }
+          ''',
+              "H264 sender capability accessor",
+          )
+
+          replace_once(
+              header,
+              '''  static bool H264EnabledStatic();
+
+            static bool SoftwareH264EnabledStatic();
+          ''',
+              '''  static bool H264EnabledStatic();
+
+            static bool SendingH264SupportedStatic();
+
+            static bool ReceivingH264SupportedStatic();
+
+            static bool SoftwareH264EnabledStatic();
+          ''',
+              "H264 support declarations",
+          )
+
+          replace_once(
+              header,
+              '''  const bool mH264Enabled = H264EnabledStatic();
+            const bool mSoftwareH264Enabled = SoftwareH264EnabledStatic();
+          ''',
+              '''  const bool mH264Enabled = H264EnabledStatic();
+            const bool mSendingH264Supported = SendingH264SupportedStatic();
+            const bool mSoftwareH264Enabled = SoftwareH264EnabledStatic();
+          ''',
+              "H264 sender capability member",
+          )
+
+          replace_once(
+              jsep,
+              '''  virtual bool H264Enabled() const = 0;
+            virtual bool SoftwareH264Enabled() const = 0;
+          ''',
+              '''  virtual bool H264Enabled() const = 0;
+            virtual bool SendingH264Supported() const {
+              return H264Enabled();
+            }
+            virtual bool SoftwareH264Enabled() const = 0;
+          ''',
+              "JSEP H264 direction preference",
+          )
+
+          replace_once(
+              jsep,
+              '''      aCodec->mProfileLevelId |= aPrefs.H264Level();
+              }
+              aCodec->mConstraints.maxBr = aPrefs.H264MaxBr();
+          ''',
+              '''      aCodec->mProfileLevelId |= aPrefs.H264Level();
+              }
+              if (!aPrefs.SendingH264Supported()) {
+                aCodec->mSupportedDirection &= sdp::kRecv;
+              }
+              aCodec->mConstraints.maxBr = aPrefs.H264MaxBr();
+          ''',
+              "receive-only H264 direction",
+          )
+
+          pref_text = prefs.read_text()
+          pref_name = "- name: media.webrtc.hw.h264.enabled"
+          pref_start = pref_text.find(pref_name)
+          if pref_start < 0:
+              raise SystemExit("WebRTC H264 preference block was not found")
+          pref_end = pref_text.find("\n- name:", pref_start + len(pref_name))
+          if pref_end < 0:
+              pref_end = len(pref_text)
+          block = pref_text[pref_start:pref_end]
+
+          old_guard = "#if defined(MOZ_WIDGET_ANDROID)"
+          new_guard = "#if defined(MOZ_WIDGET_ANDROID) || defined(XP_IOS)"
+          if new_guard not in block:
+              if block.count(old_guard) != 1:
+                  raise SystemExit(
+                      "Unexpected media.webrtc.hw.h264.enabled block"
+                  )
+              block = block.replace(old_guard, new_guard, 1)
+              prefs.write_text(
+                  pref_text[:pref_start] + block + pref_text[pref_end:]
+              )
+              print("iOS H264 preference: applied", flush=True)
+          else:
+              print("iOS H264 preference: already present", flush=True)
           PY
 
           grep -q "ReceivingH264SupportedStatic" \
@@ -269,7 +479,9 @@ jobs:
           grep -q '#if defined(MOZ_WIDGET_ANDROID) || defined(XP_IOS)' \
             engine/firefox/modules/libpref/init/StaticPrefList.yaml
 
-          git -C engine/firefox diff --stat
+          echo "WebRTC H264 source registration verified"
+          sed -n '1,65p' \
+            engine/firefox/dom/media/webrtc/jsapi/DefaultCodecPreferences.cpp
 
       - name: Build idevice support library
         shell: bash
