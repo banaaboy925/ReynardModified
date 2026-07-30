@@ -158,48 +158,24 @@ jobs:
           toolkit_line = (
               'echo "ac_add_options --enable-default-toolkit=cairo-uikit"'
           )
-          cflags_line = (
-              """echo 'export CFLAGS="${CFLAGS:-} """
-              """-DMOZ_WIDGET_UIKIT=1"'"""
-          )
-          cxxflags_line = (
-              """echo 'export CXXFLAGS="${CXXFLAGS:-} """
-              """-DMOZ_WIDGET_UIKIT=1"'"""
-          )
           target_line = 'echo "ac_add_options --target=$TARGET"'
 
-          additions = [
-              toolkit_line,
-              cflags_line,
-              cxxflags_line,
-          ]
-          missing = [
-              line for line in additions
-              if line not in build_gecko_text
-          ]
-
-          if missing:
+          if toolkit_line not in build_gecko_text:
               if build_gecko_text.count(target_line) != 1:
                   raise SystemExit(
                       "build-gecko.sh target option anchor is invalid"
                   )
-              inserted = target_line + "".join(
-                  "\n\t" + line for line in additions
-              )
               build_gecko_text = build_gecko_text.replace(
                   target_line,
-                  inserted,
+                  target_line + "\n\t" + toolkit_line,
                   1,
               )
               build_gecko.write_text(build_gecko_text)
-              print(
-                  "UIKit toolkit and global compiler define in "
-                  "build-gecko.sh: prepared"
-              )
+              print("explicit UIKit toolkit in build-gecko.sh: prepared")
           else:
               print(
-                  "UIKit toolkit and global compiler define in "
-                  "build-gecko.sh: already prepared"
+                  "explicit UIKit toolkit in build-gecko.sh: "
+                  "already prepared"
               )
           PY
 
@@ -208,10 +184,6 @@ jobs:
           grep -q 'OpenIn.appex/OpenIn' tools/release/create-ipa.sh
           grep -q 'Reynard-TrollStore.tipa' tools/release/create-ipa.sh
           grep -q 'enable-default-toolkit=cairo-uikit' \
-            tools/development/build-gecko.sh
-          grep -q 'CFLAGS=.*MOZ_WIDGET_UIKIT=1' \
-            tools/development/build-gecko.sh
-          grep -q 'CXXFLAGS=.*MOZ_WIDGET_UIKIT=1' \
             tools/development/build-gecko.sh
 
           chmod 0755 \
@@ -295,7 +267,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             support/idevice/target
-          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v17-global-uikit-define
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v18-real-gecko-patches
           restore-keys: |
             reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
 
@@ -519,18 +491,82 @@ jobs:
           for patch in patches:
               absolute = str(patch.resolve())
               relative = patch.as_posix()
+
+              # engine/firefox is extracted inside the main Reynard Git
+              # worktree, but it is not a checked-out Git submodule. Applying
+              # from inside that folder makes Git discover the parent repo and
+              # ignore paths outside the current subdirectory. Apply from the
+              # repository root and prepend engine/firefox to every patch path.
+              common = [
+                  "git",
+                  "apply",
+                  "--directory=engine/firefox",
+                  "--whitespace=nowarn",
+              ]
+
               print(f"Checking {relative}", flush=True)
               subprocess.run(
-                  ["git", "-C", str(firefox), "apply", "--check",
-                   "--whitespace=nowarn", absolute],
+                  common[:2] + ["--check"] + common[2:] + [absolute],
                   check=True,
               )
+
               print(f"Applying {relative}", flush=True)
               subprocess.run(
-                  ["git", "-C", str(firefox), "apply",
-                   "--whitespace=nowarn", absolute],
+                  common + [absolute],
                   check=True,
               )
+
+          # Prove that representative Reynard iOS hunks are truly present
+          # before making the three H264-specific direct edits.
+          patch_checks = {
+              firefox / "dom/media/webrtc/MediaEngineWebRTC.cpp": [
+                  '#include "CamerasTypes.h"',
+                  "#if defined(WEBRTC_MAC) && "
+                  "!defined(MOZ_WIDGET_UIKIT)",
+                  "#elif defined(WEBRTC_MAC) && "
+                  "!defined(MOZ_WIDGET_UIKIT)",
+              ],
+              firefox / (
+                  "dom/media/webrtc/transport/third_party/nICEr/src/"
+                  "stun/stun.h"
+              ): [
+                  "#ifndef MOZ_WIDGET_UIKIT",
+                  "#include <netinet/in_var.h>",
+              ],
+              firefox / (
+                  "dom/media/webrtc/transport/third_party/nICEr/src/"
+                  "stun/addrs-bsd.cpp"
+              ): [
+                  "#  ifndef MOZ_WIDGET_UIKIT",
+                  "#    include <netinet6/in6_var.h>",
+              ],
+              firefox / "dom/media/systemservices/moz.build": [
+                  "desktop_capture_impl_empty.cc",
+              ],
+          }
+
+          for checked_path, markers in patch_checks.items():
+              checked_text = checked_path.read_text()
+              for marker in markers:
+                  if marker not in checked_text:
+                      raise SystemExit(
+                          f"Patch verification failed for {checked_path}: "
+                          f"missing {marker!r}"
+                      )
+
+          addrs_path = firefox / (
+              "dom/media/webrtc/transport/third_party/nICEr/src/"
+              "stun/addrs-bsd.cpp"
+          )
+          if addrs_path.read_text().count("MOZ_WIDGET_UIKIT") < 3:
+              raise SystemExit(
+                  "The addrs-bsd.cpp UIKit patch did not apply completely"
+              )
+
+          print(
+              "Reynard Gecko patches genuinely applied inside engine/firefox",
+              flush=True,
+          )
 
           def replace_once(path: Path, old: str, new: str, label: str) -> None:
               source = path.read_text()
@@ -846,8 +882,6 @@ jobs:
           ac_add_options --enable-application=mobile/ios
           ac_add_options --target=aarch64-apple-ios
           ac_add_options --enable-default-toolkit=cairo-uikit
-          export CFLAGS="${CFLAGS:-} -DMOZ_WIDGET_UIKIT=1"
-          export CXXFLAGS="${CXXFLAGS:-} -DMOZ_WIDGET_UIKIT=1"
           ac_add_options --enable-ios-target=13.0
           ac_add_options --enable-webrtc
           ac_add_options --enable-optimize
@@ -876,9 +910,6 @@ jobs:
             grep -R -F -n "desktop_capture_impl"               "$SYSTEMSERVICES_OBJ" | head -50 || true
           fi
 
-          grep -F -q -- '-DMOZ_WIDGET_UIKIT=1' \
-            engine/firefox/.mozconfig
-
           CONFIG_HEADER="$GECKO_OBJ/dist/include/mozilla-config.h"
           if [ -f "$CONFIG_HEADER" ]; then
             echo "Generated iOS configuration defines:"
@@ -886,7 +917,6 @@ jobs:
               "$CONFIG_HEADER" || true
           fi
 
-          echo "Global MOZ_WIDGET_UIKIT compiler define verified"
           echo "Gecko configure completed"
 
       - name: Preflight compile WebRTC iOS targets
@@ -902,11 +932,19 @@ jobs:
           (
             cd engine/firefox
             ./mach build \
-              dom/media/webrtc \
-              dom/media/webrtc/transport/build
+              dom/media/systemservices/target-objects \
+              dom/media/webrtc/target-objects \
+              dom/media/webrtc/transport/build/target-objects \
+              dom/media/webrtc/transport/third_party/nICEr/nicer_nicer/target-objects
           ) 2>&1 | tee "$RUNNER_TEMP/gecko-webrtc-preflight.log"
 
-          echo "WebRTC iOS compile smoke test passed"
+          if grep -F -q "was ignored" \
+              "$RUNNER_TEMP/gecko-webrtc-preflight.log"; then
+            echo "::error::The WebRTC preflight ignored one or more targets"
+            exit 1
+          fi
+
+          echo "WebRTC and systemservices iOS compile smoke test passed"
 
       - name: Build Gecko for iOS
         shell: bash
