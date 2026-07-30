@@ -263,7 +263,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             support/idevice/target
-          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v12-ios-header-guards
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v13-pattern-ios-guards
           restore-keys: |
             reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
 
@@ -760,23 +760,41 @@ jobs:
               '#endif\n'
           )
           if "TargetConditionals.h" not in media_text:
-              if media_text.count(media_include_anchor) != 1:
+              if media_include_anchor not in media_text:
                   raise SystemExit(
-                      "MediaEngineWebRTC TargetConditionals anchor is invalid"
+                      "MediaEngineWebRTC TargetConditionals anchor is missing"
                   )
               media_text = media_text.replace(
                   media_include_anchor, media_target_include, 1
               )
 
-          old_media_guard = "!defined(MOZ_WIDGET_UIKIT)"
-          if media_text.count(old_media_guard) != 2:
-              raise SystemExit(
-                  "Expected two MediaEngineWebRTC UIKit guards"
-              )
-          media_text = media_text.replace(
-              old_media_guard, "!TARGET_OS_IPHONE"
+          # Replace every UIKit-negated WEBRTC_MAC condition regardless of
+          # whether it appears in an #if or #elif and regardless of spacing.
+          media_pattern = re.compile(
+              r"defined\(WEBRTC_MAC\)\s*&&\s*"
+              r"!defined\(MOZ_WIDGET_UIKIT\)"
           )
+          media_text, media_replacements = media_pattern.subn(
+              "defined(WEBRTC_MAC) && "
+              "(!defined(__APPLE__) || !TARGET_OS_IPHONE)",
+              media_text,
+          )
+
+          if media_replacements == 0:
+              desired_media_guard = (
+                  "defined(WEBRTC_MAC) && "
+                  "(!defined(__APPLE__) || !TARGET_OS_IPHONE)"
+              )
+              if desired_media_guard not in media_text:
+                  raise SystemExit(
+                      "No MediaEngineWebRTC iOS guard could be identified"
+                  )
+
           media_engine.write_text(media_text)
+          print(
+              f"MediaEngineWebRTC guards replaced: {media_replacements}",
+              flush=True,
+          )
 
           stun_header = firefox / (
               "dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h"
@@ -790,20 +808,38 @@ jobs:
               "#endif\n"
           )
           if "TargetConditionals.h" not in stun_text:
-              if stun_text.count(stun_define_anchor) != 1:
-                  raise SystemExit("stun.h TargetConditionals anchor is invalid")
+              if stun_define_anchor not in stun_text:
+                  raise SystemExit(
+                      "stun.h TargetConditionals anchor is missing"
+                  )
               stun_text = stun_text.replace(
                   stun_define_anchor, stun_target_include, 1
               )
 
-          old_stun_guard = "#ifndef MOZ_WIDGET_UIKIT"
-          new_stun_guard = "#if !defined(__APPLE__) || !TARGET_OS_IPHONE"
-          if stun_text.count(old_stun_guard) != 1:
-              raise SystemExit("Expected one stun.h UIKit guard")
-          stun_text = stun_text.replace(
-              old_stun_guard, new_stun_guard, 1
+          stun_pattern = re.compile(
+              r"(?m)^(?P<indent>\s*)#\s*ifndef\s+"
+              r"MOZ_WIDGET_UIKIT\s*$"
           )
+          stun_text, stun_replacements = stun_pattern.subn(
+              lambda match: (
+                  match.group("indent")
+                  + "#if !defined(__APPLE__) || !TARGET_OS_IPHONE"
+              ),
+              stun_text,
+          )
+
+          if stun_replacements == 0:
+              desired_stun_guard = (
+                  "#if !defined(__APPLE__) || !TARGET_OS_IPHONE"
+              )
+              if desired_stun_guard not in stun_text:
+                  raise SystemExit("No stun.h iOS guard could be identified")
+
           stun_header.write_text(stun_text)
+          print(
+              f"stun.h guards replaced: {stun_replacements}",
+              flush=True,
+          )
 
           addrs_bsd = firefox / (
               "dom/media/webrtc/transport/third_party/nICEr/src/stun/"
@@ -818,32 +854,50 @@ jobs:
               "#  endif\n"
           )
           if "TargetConditionals.h" not in addrs_text:
-              if addrs_text.count(addrs_anchor) != 1:
+              if addrs_anchor not in addrs_text:
                   raise SystemExit(
-                      "addrs-bsd.cpp TargetConditionals anchor is invalid"
+                      "addrs-bsd.cpp TargetConditionals anchor is missing"
                   )
               addrs_text = addrs_text.replace(
                   addrs_anchor, addrs_target_include, 1
               )
 
-          old_addrs_guard = "#  ifndef MOZ_WIDGET_UIKIT"
-          new_addrs_guard = (
-              "#  if !defined(__APPLE__) || !TARGET_OS_IPHONE"
+          addrs_pattern = re.compile(
+              r"(?m)^(?P<indent>\s*)#\s*ifndef\s+"
+              r"MOZ_WIDGET_UIKIT\s*$"
           )
-          if addrs_text.count(old_addrs_guard) != 3:
-              raise SystemExit(
-                  "Expected three addrs-bsd.cpp UIKit guards"
+          addrs_text, addrs_replacements = addrs_pattern.subn(
+              lambda match: (
+                  match.group("indent")
+                  + "#if !defined(__APPLE__) || !TARGET_OS_IPHONE"
+              ),
+              addrs_text,
+          )
+
+          if addrs_replacements == 0:
+              desired_addrs_guard = (
+                  "#  if !defined(__APPLE__) || !TARGET_OS_IPHONE"
               )
-          addrs_text = addrs_text.replace(
-              old_addrs_guard, new_addrs_guard
-          )
+              if desired_addrs_guard not in addrs_text:
+                  raise SystemExit(
+                      "No addrs-bsd.cpp iOS guards could be identified"
+                  )
+
           addrs_bsd.write_text(addrs_text)
+          print(
+              f"addrs-bsd.cpp guards replaced: {addrs_replacements}",
+              flush=True,
+          )
 
           for source_path in (media_engine, stun_header, addrs_bsd):
-              remaining = source_path.read_text().count("MOZ_WIDGET_UIKIT")
-              if remaining:
+              source = source_path.read_text()
+              if "MOZ_WIDGET_UIKIT" in source:
                   raise SystemExit(
-                      f"{source_path} still has {remaining} UIKit macro guards"
+                      f"{source_path} still contains MOZ_WIDGET_UIKIT"
+                  )
+              if "TargetConditionals.h" not in source:
+                  raise SystemExit(
+                      f"{source_path} is missing TargetConditionals.h"
                   )
 
           print(
@@ -869,7 +923,8 @@ jobs:
           ! grep -q '"video_engine/desktop_device_info.cc"' \
             engine/firefox/dom/media/systemservices/moz.build
 
-          grep -q 'defined(WEBRTC_MAC) && !TARGET_OS_IPHONE' \
+          grep -F -q \
+            'defined(WEBRTC_MAC) && (!defined(__APPLE__) || !TARGET_OS_IPHONE)' \
             engine/firefox/dom/media/webrtc/MediaEngineWebRTC.cpp
           grep -q '#if !defined(__APPLE__) || !TARGET_OS_IPHONE' \
             engine/firefox/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h
