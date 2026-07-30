@@ -158,21 +158,49 @@ jobs:
           toolkit_line = (
               'echo "ac_add_options --enable-default-toolkit=cairo-uikit"'
           )
+          cflags_line = (
+              """echo 'export CFLAGS="${CFLAGS:-} """
+              """-DMOZ_WIDGET_UIKIT=1"'"""
+          )
+          cxxflags_line = (
+              """echo 'export CXXFLAGS="${CXXFLAGS:-} """
+              """-DMOZ_WIDGET_UIKIT=1"'"""
+          )
           target_line = 'echo "ac_add_options --target=$TARGET"'
-          if toolkit_line not in build_gecko_text:
+
+          additions = [
+              toolkit_line,
+              cflags_line,
+              cxxflags_line,
+          ]
+          missing = [
+              line for line in additions
+              if line not in build_gecko_text
+          ]
+
+          if missing:
               if build_gecko_text.count(target_line) != 1:
                   raise SystemExit(
                       "build-gecko.sh target option anchor is invalid"
                   )
+              inserted = target_line + "".join(
+                  "\n\t" + line for line in additions
+              )
               build_gecko_text = build_gecko_text.replace(
                   target_line,
-                  target_line + "\n\t" + toolkit_line,
+                  inserted,
                   1,
               )
               build_gecko.write_text(build_gecko_text)
-              print("explicit UIKit toolkit in build-gecko.sh: prepared")
+              print(
+                  "UIKit toolkit and global compiler define in "
+                  "build-gecko.sh: prepared"
+              )
           else:
-              print("explicit UIKit toolkit in build-gecko.sh: already prepared")
+              print(
+                  "UIKit toolkit and global compiler define in "
+                  "build-gecko.sh: already prepared"
+              )
           PY
 
           grep -q 'REYNARD_CODE_SIGN_IDENTITY' browser/Scripts/AddGecko.sh
@@ -180,6 +208,10 @@ jobs:
           grep -q 'OpenIn.appex/OpenIn' tools/release/create-ipa.sh
           grep -q 'Reynard-TrollStore.tipa' tools/release/create-ipa.sh
           grep -q 'enable-default-toolkit=cairo-uikit' \
+            tools/development/build-gecko.sh
+          grep -q 'CFLAGS=.*MOZ_WIDGET_UIKIT=1' \
+            tools/development/build-gecko.sh
+          grep -q 'CXXFLAGS=.*MOZ_WIDGET_UIKIT=1' \
             tools/development/build-gecko.sh
 
           chmod 0755 \
@@ -263,7 +295,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             support/idevice/target
-          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v16-flexible-addrs-guards
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v17-global-uikit-define
           restore-keys: |
             reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
 
@@ -745,182 +777,6 @@ jobs:
               flush=True,
           )
 
-          # Several upstream Reynard patches use MOZ_WIDGET_UIKIT in source
-          # files before Mozilla's generated configuration header is visible.
-          # Use Apple's TargetConditionals.h instead. This prevents iPhoneOS
-          # builds from including macOS ApplicationServices and private
-          # netinet headers.
-
-          def add_target_conditionals(
-              path: Path,
-              anchor: str,
-              replacement_text: str,
-              label: str,
-          ) -> str:
-              source = path.read_text()
-              if "TargetConditionals.h" not in source:
-                  if anchor not in source:
-                      raise SystemExit(
-                          f"{label}: TargetConditionals anchor is missing"
-                      )
-                  source = source.replace(anchor, replacement_text, 1)
-              return source
-
-          def rewrite_guard_before_marker(
-              source: str,
-              marker: str,
-              directive: str,
-              replacement_line: str,
-              label: str,
-              occurrence: int = 0,
-              search_limit: int = 20,
-          ) -> str:
-              lines = source.splitlines(keepends=True)
-              matches = [
-                  index
-                  for index, line in enumerate(lines)
-                  if marker in line
-              ]
-              if len(matches) <= occurrence:
-                  raise SystemExit(
-                      f"{label}: source marker is missing: {marker}"
-                  )
-
-              marker_index = matches[occurrence]
-              pattern = re.compile(
-                  rf"^\s*#\s*{re.escape(directive)}\b"
-              )
-
-              lower_bound = max(-1, marker_index - search_limit - 1)
-              for index in range(marker_index - 1, lower_bound, -1):
-                  if pattern.match(lines[index]):
-                      newline = "\n" if lines[index].endswith("\n") else ""
-                      lines[index] = replacement_line + newline
-                      return "".join(lines)
-
-              raise SystemExit(
-                  f"{label}: no nearby #{directive} directive was found"
-              )
-
-          media_engine = firefox / "dom/media/webrtc/MediaEngineWebRTC.cpp"
-          media_text = add_target_conditionals(
-              media_engine,
-              '#include "MediaEngineWebRTC.h"\n',
-              '#include "MediaEngineWebRTC.h"\n\n'
-              '#if defined(__APPLE__)\n'
-              '#  include <TargetConditionals.h>\n'
-              '#endif\n',
-              "MediaEngineWebRTC",
-          )
-
-          # Locate the actual macOS-only code, then rewrite the surrounding
-          # preprocessor directives. This is independent of how Reynard's patch
-          # formats or spells its original UIKit condition.
-          media_text = rewrite_guard_before_marker(
-              media_text,
-              'modules/desktop_capture/mac/screen_capturer_sck.h',
-              "if",
-              "#if defined(WEBRTC_MAC) && "
-              "(!defined(__APPLE__) || !TARGET_OS_IPHONE)",
-              "ScreenCaptureKit include guard",
-          )
-          media_text = rewrite_guard_before_marker(
-              media_text,
-              "media_getdisplaymedia_screencapturekit_enabled_AtStartup",
-              "elif",
-              "#elif defined(WEBRTC_MAC) && "
-              "(!defined(__APPLE__) || !TARGET_OS_IPHONE)",
-              "ScreenCaptureKit prompt guard",
-          )
-          media_engine.write_text(media_text)
-
-          stun_header = firefox / (
-              "dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h"
-          )
-          stun_text = add_target_conditionals(
-              stun_header,
-              "#define _STUN_H\n",
-              "#define _STUN_H\n\n"
-              "#if defined(__APPLE__)\n"
-              "#  include <TargetConditionals.h>\n"
-              "#endif\n",
-              "stun.h",
-          )
-          stun_text = rewrite_guard_before_marker(
-              stun_text,
-              "#include <netinet/in_var.h>",
-              "ifndef",
-              "#if !defined(__APPLE__) || !TARGET_OS_IPHONE",
-              "netinet/in_var.h guard",
-          )
-          stun_header.write_text(stun_text)
-
-          addrs_bsd = firefox / (
-              "dom/media/webrtc/transport/third_party/nICEr/src/stun/"
-              "addrs-bsd.cpp"
-          )
-          addrs_text = add_target_conditionals(
-              addrs_bsd,
-              "#if defined(BSD) || defined(DARWIN)\n",
-              "#if defined(BSD) || defined(DARWIN)\n\n"
-              "#  if defined(__APPLE__)\n"
-              "#    include <TargetConditionals.h>\n"
-              "#  endif\n",
-              "addrs-bsd.cpp",
-          )
-
-          # Reynard's patch adds three MOZ_WIDGET_UIKIT guards here, but the
-          # exact indentation of the associated source lines is not stable.
-          # Replace the guard directives themselves instead of searching for
-          # netinet6/in6_var.h or particular function-body markers.
-          addrs_guard_pattern = re.compile(
-              r"(?m)^(?P<indent>[ \t]*)#\s*ifndef\s+"
-              r"MOZ_WIDGET_UIKIT\s*$"
-          )
-          addrs_text, addrs_replacements = addrs_guard_pattern.subn(
-              lambda match: (
-                  match.group("indent")
-                  + "#if !defined(__APPLE__) || !TARGET_OS_IPHONE"
-              ),
-              addrs_text,
-          )
-
-          if addrs_replacements == 0:
-              if "MOZ_WIDGET_UIKIT" in addrs_text:
-                  raise SystemExit(
-                      "addrs-bsd.cpp still contains an unrecognised "
-                      "MOZ_WIDGET_UIKIT guard"
-                  )
-              if "TARGET_OS_IPHONE" not in addrs_text:
-                  raise SystemExit(
-                      "No addrs-bsd.cpp iOS guard could be identified"
-                  )
-
-          addrs_bsd.write_text(addrs_text)
-          print(
-              f"addrs-bsd.cpp guards replaced: {addrs_replacements}",
-              flush=True,
-          )
-
-          for source_path in (media_engine, stun_header, addrs_bsd):
-              source = source_path.read_text()
-              if "MOZ_WIDGET_UIKIT" in source:
-                  raise SystemExit(
-                      f"{source_path} still contains MOZ_WIDGET_UIKIT"
-                  )
-              if "TargetConditionals.h" not in source:
-                  raise SystemExit(
-                      f"{source_path} is missing TargetConditionals.h"
-                  )
-              if "TARGET_OS_IPHONE" not in source:
-                  raise SystemExit(
-                      f"{source_path} is missing an iOS target guard"
-                  )
-
-          print(
-              "Structurally replaced macOS-only WebRTC header guards",
-              flush=True,
-          )
           PY
 
           grep -q "ReceivingH264SupportedStatic" \
@@ -940,24 +796,14 @@ jobs:
           ! grep -q '"video_engine/desktop_device_info.cc"' \
             engine/firefox/dom/media/systemservices/moz.build
 
-          grep -F -q \
-            '#if defined(WEBRTC_MAC) && (!defined(__APPLE__) || !TARGET_OS_IPHONE)' \
-            engine/firefox/dom/media/webrtc/MediaEngineWebRTC.cpp
-          grep -F -q \
-            '#elif defined(WEBRTC_MAC) && (!defined(__APPLE__) || !TARGET_OS_IPHONE)' \
-            engine/firefox/dom/media/webrtc/MediaEngineWebRTC.cpp
-          grep -F -q '#if !defined(__APPLE__) || !TARGET_OS_IPHONE' \
-            engine/firefox/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h
-          grep -F -q 'if !defined(__APPLE__) || !TARGET_OS_IPHONE' \
-            engine/firefox/dom/media/webrtc/transport/third_party/nICEr/src/stun/addrs-bsd.cpp
-          ! grep -q 'MOZ_WIDGET_UIKIT' \
-            engine/firefox/dom/media/webrtc/MediaEngineWebRTC.cpp
-          ! grep -q 'MOZ_WIDGET_UIKIT' \
-            engine/firefox/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h
-          ! grep -q 'MOZ_WIDGET_UIKIT' \
-            engine/firefox/dom/media/webrtc/transport/third_party/nICEr/src/stun/addrs-bsd.cpp
+          echo "WebRTC H264 and desktop-capture source selection verified"
 
-          echo "WebRTC H264, desktop capture, and iOS header guards verified"
+          echo "Reynard UIKit guards after patch application:"
+          grep -n -E 'MOZ_WIDGET_UIKIT|screen_capturer_sck|in_var.h|in6_var.h' \
+            engine/firefox/dom/media/webrtc/MediaEngineWebRTC.cpp \
+            engine/firefox/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h \
+            engine/firefox/dom/media/webrtc/transport/third_party/nICEr/src/stun/addrs-bsd.cpp \
+            || true
           sed -n '/Reynard iOS: desktop screen capture/,+7p' \
             engine/firefox/dom/media/systemservices/moz.build
           sed -n '1,65p' \
@@ -1000,6 +846,8 @@ jobs:
           ac_add_options --enable-application=mobile/ios
           ac_add_options --target=aarch64-apple-ios
           ac_add_options --enable-default-toolkit=cairo-uikit
+          export CFLAGS="${CFLAGS:-} -DMOZ_WIDGET_UIKIT=1"
+          export CXXFLAGS="${CXXFLAGS:-} -DMOZ_WIDGET_UIKIT=1"
           ac_add_options --enable-ios-target=13.0
           ac_add_options --enable-webrtc
           ac_add_options --enable-optimize
@@ -1028,6 +876,9 @@ jobs:
             grep -R -F -n "desktop_capture_impl"               "$SYSTEMSERVICES_OBJ" | head -50 || true
           fi
 
+          grep -F -q -- '-DMOZ_WIDGET_UIKIT=1' \
+            engine/firefox/.mozconfig
+
           CONFIG_HEADER="$GECKO_OBJ/dist/include/mozilla-config.h"
           if [ -f "$CONFIG_HEADER" ]; then
             echo "Generated iOS configuration defines:"
@@ -1035,6 +886,7 @@ jobs:
               "$CONFIG_HEADER" || true
           fi
 
+          echo "Global MOZ_WIDGET_UIKIT compiler define verified"
           echo "Gecko configure completed"
 
       - name: Preflight compile WebRTC iOS targets
