@@ -263,7 +263,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             support/idevice/target
-          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v13-pattern-ios-guards
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v14-import-re
           restore-keys: |
             reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
 
@@ -465,6 +465,7 @@ jobs:
 
           python3 - <<'PY'
           from pathlib import Path
+          import re
           import subprocess
 
           firefox = Path("engine/firefox")
