@@ -263,7 +263,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             support/idevice/target
-          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v15-structural-ios-guards
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v16-flexible-addrs-guards
           restore-keys: |
             reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
 
@@ -868,29 +868,39 @@ jobs:
               "#  endif\n",
               "addrs-bsd.cpp",
           )
-          addrs_text = rewrite_guard_before_marker(
-              addrs_text,
-              "#    include <netinet6/in6_var.h>",
-              "ifndef",
-              "#  if !defined(__APPLE__) || !TARGET_OS_IPHONE",
-              "netinet6/in6_var.h guard",
+
+          # Reynard's patch adds three MOZ_WIDGET_UIKIT guards here, but the
+          # exact indentation of the associated source lines is not stable.
+          # Replace the guard directives themselves instead of searching for
+          # netinet6/in6_var.h or particular function-body markers.
+          addrs_guard_pattern = re.compile(
+              r"(?m)^(?P<indent>[ \t]*)#\s*ifndef\s+"
+              r"MOZ_WIDGET_UIKIT\s*$"
           )
-          addrs_text = rewrite_guard_before_marker(
+          addrs_text, addrs_replacements = addrs_guard_pattern.subn(
+              lambda match: (
+                  match.group("indent")
+                  + "#if !defined(__APPLE__) || !TARGET_OS_IPHONE"
+              ),
               addrs_text,
-              "static int stun_ifaddr_get_v6_flags",
-              "ifndef",
-              "#  if !defined(__APPLE__) || !TARGET_OS_IPHONE",
-              "IPv6 flag helper guard",
-              occurrence=0,
           )
-          addrs_text = rewrite_guard_before_marker(
-              addrs_text,
-              "flags & IN6_IFF_TEMPORARY",
-              "ifndef",
-              "#  if !defined(__APPLE__) || !TARGET_OS_IPHONE",
-              "temporary IPv6 flag guard",
-          )
+
+          if addrs_replacements == 0:
+              if "MOZ_WIDGET_UIKIT" in addrs_text:
+                  raise SystemExit(
+                      "addrs-bsd.cpp still contains an unrecognised "
+                      "MOZ_WIDGET_UIKIT guard"
+                  )
+              if "TARGET_OS_IPHONE" not in addrs_text:
+                  raise SystemExit(
+                      "No addrs-bsd.cpp iOS guard could be identified"
+                  )
+
           addrs_bsd.write_text(addrs_text)
+          print(
+              f"addrs-bsd.cpp guards replaced: {addrs_replacements}",
+              flush=True,
+          )
 
           for source_path in (media_engine, stun_header, addrs_bsd):
               source = source_path.read_text()
@@ -938,7 +948,7 @@ jobs:
             engine/firefox/dom/media/webrtc/MediaEngineWebRTC.cpp
           grep -F -q '#if !defined(__APPLE__) || !TARGET_OS_IPHONE' \
             engine/firefox/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h
-          grep -F -q '#  if !defined(__APPLE__) || !TARGET_OS_IPHONE' \
+          grep -F -q 'if !defined(__APPLE__) || !TARGET_OS_IPHONE' \
             engine/firefox/dom/media/webrtc/transport/third_party/nICEr/src/stun/addrs-bsd.cpp
           ! grep -q 'MOZ_WIDGET_UIKIT' \
             engine/firefox/dom/media/webrtc/MediaEngineWebRTC.cpp
