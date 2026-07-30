@@ -267,7 +267,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             support/idevice/target
-          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v18-real-gecko-patches
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v19-full-build-after-configure
           restore-keys: |
             reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
 
@@ -919,33 +919,6 @@ jobs:
 
           echo "Gecko configure completed"
 
-      - name: Preflight compile WebRTC iOS targets
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          export CBINDGEN="$(command -v cbindgen)"
-
-          # A partial tree build is used only as an early smoke test for the
-          # exact directories that previously failed. The full Gecko build
-          # remains authoritative and runs immediately afterwards.
-          (
-            cd engine/firefox
-            ./mach build \
-              dom/media/systemservices/target-objects \
-              dom/media/webrtc/target-objects \
-              dom/media/webrtc/transport/build/target-objects \
-              dom/media/webrtc/transport/third_party/nICEr/nicer_nicer/target-objects
-          ) 2>&1 | tee "$RUNNER_TEMP/gecko-webrtc-preflight.log"
-
-          if grep -F -q "was ignored" \
-              "$RUNNER_TEMP/gecko-webrtc-preflight.log"; then
-            echo "::error::The WebRTC preflight ignored one or more targets"
-            exit 1
-          fi
-
-          echo "WebRTC and systemservices iOS compile smoke test passed"
-
       - name: Build Gecko for iOS
         shell: bash
         run: |
@@ -1033,7 +1006,6 @@ jobs:
           name: Reynard-build-failure-logs-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/gecko-configure.log
-            ${{ runner.temp }}/gecko-webrtc-preflight.log
             ${{ runner.temp }}/gecko-build.log
             ${{ runner.temp }}/xcode-archive.log
             ${{ runner.temp }}/package.log
