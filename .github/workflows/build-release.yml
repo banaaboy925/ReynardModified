@@ -38,7 +38,7 @@ jobs:
   build:
     # Apple Silicon hosted runner. Swap for a `-xlarge` variant or a
     # self-hosted Mac if you hit the disk-space/time limits noted above.
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 360
 
     steps:
