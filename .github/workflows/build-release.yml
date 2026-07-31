@@ -57,28 +57,71 @@ jobs:
       - name: Checkout support/idevice submodule
         run: git submodule update --init --depth 1 -- support/idevice
 
-      - name: Select Xcode
-        run: sudo xcode-select -p
+      - name: Select and verify Xcode 26.6
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          XCODE_DEVELOPER="/Applications/Xcode_26.6.app/Contents/Developer"
+          test -d "$XCODE_DEVELOPER"
+
+          sudo xcode-select -s "$XCODE_DEVELOPER"
+
+          echo "DEVELOPER_DIR=$XCODE_DEVELOPER" >> "$GITHUB_ENV"
+
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphoneos --show-sdk-path
 
       - name: Show free disk space
         run: df -h /
 
-      - name: Free up runner disk space
-        # Full Gecko builds are large; the preinstalled Android SDK/NDK,
-        # extra JVMs, etc. on GitHub-hosted macOS runners aren't needed here
-        # and are worth clearing before the build starts.
+      - name: Free up runner disk space safely
+        shell: bash
         run: |
+          set -euo pipefail
+
           sudo rm -rf /Users/runner/Library/Android/sdk || true
-          # sudo rm -rf /Applications/Xcode_*.app 2>/dev/null || true
-          # df -h /
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* || true
+          rm -rf "$HOME/Library/Developer/CoreSimulator" || true
+
+          # Do not delete /Applications/Xcode_26.6.app.
+          test -d "$DEVELOPER_DIR"
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          xcrun --sdk iphoneos --show-sdk-path
+
+          df -h /
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ env.IOS_RUST_TARGET }}
 
-      - name: Install ldid
-        run: brew install ldid
+      - name: Install signing and linker tools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          command -v ldid >/dev/null 2>&1 || brew install ldid
+          brew list lld@19 >/dev/null 2>&1 || brew install lld@19
+          command -v cbindgen >/dev/null 2>&1 || brew install cbindgen
+
+          LLD_BIN="$(brew --prefix lld@19)/bin"
+
+          test -x "$LLD_BIN/ld64.lld"
+          test -x "$LLD_BIN/wasm-ld"
+
+          echo "$LLD_BIN" >> "$GITHUB_PATH"
+          echo "LLD_BIN=$LLD_BIN" >> "$GITHUB_ENV"
+
+          export PATH="$LLD_BIN:$PATH"
+
+          ld64.lld --version
+          wasm-ld --version
+          cbindgen --version
 
       - name: Confirm Python 3
         run: python3 --version
@@ -106,8 +149,34 @@ jobs:
       - name: Build idevice FFI static library
         run: ./tools/development/build-idevice.sh
 
+      - name: Verify Gecko iOS linker
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PATH="$LLD_BIN:$PATH"
+
+          test -x "$(command -v ld64.lld)"
+
+          IOS_SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          test -d "$IOS_SDK"
+
+          # This mirrors the linker probe shown in the failed Gecko log.
+          /usr/bin/clang \
+            -isysroot "$IOS_SDK" \
+            -mios-version-min=13.0 \
+            --target=aarch64-apple-ios \
+            -fuse-ld=lld \
+            -Wl,--version
+
+          echo "Gecko can locate ld64.lld while targeting iOS 13.0"
+
       - name: Build the Gecko engine (aarch64-apple-ios)
-        run: ./tools/development/build-gecko.sh
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$LLD_BIN:$PATH"
+          ./tools/development/build-gecko.sh
 
       - name: Archive Reynard.app (unsigned)
         # Per the README, distribution-certificate signing is not part of
