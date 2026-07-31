@@ -267,7 +267,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             support/idevice/target
-          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v19-full-build-after-configure
+            ~/.cache/reynard/wasi-sdk-29.0-x86_64-macos.tar.gz
+          key: reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-tools-v20-coherent-wasi-sdk29
           restore-keys: |
             reynard-h264-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_VERSION }}-
 
@@ -280,121 +281,202 @@ jobs:
 
       - name: Install and verify build tools
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           command -v ldid >/dev/null 2>&1 || brew install ldid
           brew list lld@19 >/dev/null 2>&1 || brew install lld@19
           command -v cbindgen >/dev/null 2>&1 || brew install cbindgen
-          # wasi-runtimes provides compiler-rt/libc++, while wasi-libc
-          # provides the C headers and libc used by Firefox's WASI checks.
-          brew list wasi-libc >/dev/null 2>&1 || brew install wasi-libc
-          brew list wasi-runtimes >/dev/null 2>&1 || brew install wasi-runtimes
 
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add aarch64-apple-ios
 
           LLD_BIN="$(brew --prefix lld@19)/bin"
-          WASI_CLANG="$(brew --prefix llvm)/bin/clang"
-          WASI_CLANGXX="$(brew --prefix llvm)/bin/clang++"
-
-          # Homebrew installs the C sysroot and the C++ runtimes into
-          # different formula prefixes. Merge both into one sysroot for
-          # Firefox instead of relying on ambiguous global symlinks.
-          WASI_LIBC_SYSROOT="$(brew --prefix wasi-libc)/share/wasi-sysroot"
-          WASI_RUNTIMES_SYSROOT="$(brew --prefix wasi-runtimes)/share/wasi-sysroot"
-          WASI_RESOURCE_DIR="$(brew --prefix wasi-runtimes)/share/wasi-runtimes"
-          WASI_SYSROOT_DIR="$RUNNER_TEMP/reynard-wasi-sysroot"
-
           test -x "$LLD_BIN/ld64.lld"
-          test -x "$WASI_CLANG"
-          test -x "$WASI_CLANGXX"
-          test -d "$WASI_LIBC_SYSROOT"
-          test -d "$WASI_RUNTIMES_SYSROOT"
-          test -d "$WASI_RESOURCE_DIR"
-
-          rm -rf "$WASI_SYSROOT_DIR"
-          mkdir -p "$WASI_SYSROOT_DIR"
-          rsync -a "$WASI_LIBC_SYSROOT/" "$WASI_SYSROOT_DIR/"
-          rsync -a "$WASI_RUNTIMES_SYSROOT/" "$WASI_SYSROOT_DIR/"
-
-          echo "WASI libc sysroot:     $WASI_LIBC_SYSROOT"
-          echo "WASI runtime sysroot:  $WASI_RUNTIMES_SYSROOT"
-          echo "Merged WASI sysroot:   $WASI_SYSROOT_DIR"
-          echo "WASI resource dir:     $WASI_RESOURCE_DIR"
-
-          STRING_H="$(find "$WASI_SYSROOT_DIR" -type f -name string.h -print -quit)"
-          CSTRING="$(find "$WASI_SYSROOT_DIR" -type f -name cstring -print -quit)"
-
-          if [ -z "$STRING_H" ]; then
-            echo "::error::WASI C header string.h was not found in the merged sysroot"
-            find "$WASI_SYSROOT_DIR" -maxdepth 4 -type d | sort
-            exit 1
-          fi
-
-          if [ -z "$CSTRING" ]; then
-            echo "::error::WASI C++ header cstring was not found in the merged sysroot"
-            find "$WASI_SYSROOT_DIR" -maxdepth 6 -type d | sort
-            exit 1
-          fi
-
-          echo "Found C header:   $STRING_H"
-          echo "Found C++ header: $CSTRING"
-
           echo "$LLD_BIN" >> "$GITHUB_PATH"
           export PATH="$LLD_BIN:$PATH"
 
-          # Firefox adds the target and sysroot flags itself. Keep the
-          # Homebrew WASI resource directory explicit so Clang can locate
-          # compiler-rt and the libc++ runtime.
-          export WASM_CC="$WASI_CLANG -resource-dir=$WASI_RESOURCE_DIR"
-          export WASM_CXX="$WASI_CLANGXX -resource-dir=$WASI_RESOURCE_DIR"
+          # Use one coherent WASI SDK. The previous workflow merged a current
+          # Homebrew wasi-libc with a separately packaged runtime, which reached
+          # RLBox but failed to resolve __wasm_first_page_end.
+          #
+          # wasi-sdk 29 predates the LLVM 22.1 target/runtime change and keeps
+          # clang, wasm-ld, libc, libc++, compiler-rt and headers matched.
+          WASI_VERSION="29"
+          WASI_VERSION_FULL="29.0"
+          WASI_ASSET="wasi-sdk-${WASI_VERSION_FULL}-x86_64-macos.tar.gz"
+          WASI_URL="https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_VERSION}/${WASI_ASSET}"
+          WASI_CACHE="$HOME/.cache/reynard/$WASI_ASSET"
+          WASI_RELEASE_JSON="$RUNNER_TEMP/wasi-sdk-release.json"
+          WASI_SDK_DIR="$RUNNER_TEMP/wasi-sdk-${WASI_VERSION_FULL}"
+
+          mkdir -p "$(dirname "$WASI_CACHE")"
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/WebAssembly/wasi-sdk/releases/tags/wasi-sdk-${WASI_VERSION}" \
+            -o "$WASI_RELEASE_JSON"
+
+          EXPECTED_HASH="$(
+            python3 - "$WASI_RELEASE_JSON" "$WASI_ASSET" <<'PY'
+          import json
+          import sys
+
+          release_path, asset_name = sys.argv[1:]
+          with open(release_path, encoding="utf-8") as handle:
+              release = json.load(handle)
+
+          for asset in release.get("assets", []):
+              if asset.get("name") != asset_name:
+                  continue
+              digest = asset.get("digest") or ""
+              if digest.startswith("sha256:"):
+                  print(digest.removeprefix("sha256:"))
+              break
+          PY
+          )"
+
+          verify_wasi_archive() {
+            test -s "$WASI_CACHE" || return 1
+            tar -tzf "$WASI_CACHE" >/dev/null || return 1
+
+            if [ -n "$EXPECTED_HASH" ]; then
+              ACTUAL_HASH="$(
+                shasum -a 256 "$WASI_CACHE" | awk '{ print $1 }'
+              )"
+              test "$ACTUAL_HASH" = "$EXPECTED_HASH"
+            fi
+          }
+
+          if ! verify_wasi_archive; then
+            rm -f "$WASI_CACHE"
+            curl --fail --location \
+              --retry 5 --retry-all-errors \
+              --continue-at - \
+              "$WASI_URL" \
+              -o "$WASI_CACHE"
+          fi
+
+          if ! verify_wasi_archive; then
+            echo "::error::WASI SDK archive verification failed"
+            rm -f "$WASI_CACHE"
+            exit 1
+          fi
+
+          if [ -n "$EXPECTED_HASH" ]; then
+            echo "Verified WASI SDK release SHA-256: $EXPECTED_HASH"
+          else
+            echo "::warning::GitHub did not publish an asset digest; tar integrity passed"
+          fi
+
+          rm -rf "$WASI_SDK_DIR"
+          mkdir -p "$WASI_SDK_DIR"
+          tar -xzf "$WASI_CACHE" \
+            --strip-components=1 \
+            -C "$WASI_SDK_DIR"
+
+          WASI_CLANG="$WASI_SDK_DIR/bin/clang"
+          WASI_CLANGXX="$WASI_SDK_DIR/bin/clang++"
+          WASI_WASM_LD="$WASI_SDK_DIR/bin/wasm-ld"
+          WASI_SYSROOT_DIR="$WASI_SDK_DIR/share/wasi-sysroot"
+
+          test -x "$WASI_CLANG"
+          test -x "$WASI_CLANGXX"
+          test -x "$WASI_WASM_LD"
+          test -d "$WASI_SYSROOT_DIR"
+          test -f "$WASI_SYSROOT_DIR/include/string.h"
+          test -f "$WASI_SYSROOT_DIR/include/c++/v1/cstring"
+
+          export WASM_CC="$WASI_CLANG"
+          export WASM_CXX="$WASI_CLANGXX"
           export WASI_SYSROOT="$WASI_SYSROOT_DIR"
+          export WASI_SDK_PATH="$WASI_SDK_DIR"
 
           {
             echo "WASM_CC=$WASM_CC"
             echo "WASM_CXX=$WASM_CXX"
             echo "WASI_SYSROOT=$WASI_SYSROOT"
+            echo "WASI_SDK_PATH=$WASI_SDK_PATH"
           } >> "$GITHUB_ENV"
 
           "$LLD_BIN/ld64.lld" --version
+          "$WASI_CLANG" --version
+          "$WASI_WASM_LD" --version
           cbindgen --version
           rustc --version
           cargo --version
 
+          # Exercise the wasi-libc allocator objects involved in the previous
+          # RLBox failure, rather than merely checking that headers can be found.
           TEST_DIR="$RUNNER_TEMP/wasi-test"
           rm -rf "$TEST_DIR"
           mkdir -p "$TEST_DIR"
 
           cat > "$TEST_DIR/test.c" <<'EOF'
+          #include <stdlib.h>
           #include <string.h>
-          int main(void) { return strlen("reynard") == 7 ? 0 : 1; }
+
+          int main(void) {
+            char* value = (char*)malloc(16);
+            if (!value) {
+              return 1;
+            }
+            memcpy(value, "reynard", 8);
+            int result = value[0] == 'r' ? 0 : 1;
+            free(value);
+            return result;
+          }
           EOF
 
           cat > "$TEST_DIR/test.cpp" <<'EOF'
+          #include <cstdlib>
           #include <cstring>
-          int main() { return std::strlen("reynard") == 7 ? 0 : 1; }
+
+          int main() {
+            auto* value = static_cast<char*>(std::malloc(16));
+            if (!value) {
+              return 1;
+            }
+            std::memcpy(value, "reynard", 8);
+            int result = value[0] == 'r' ? 0 : 1;
+            std::free(value);
+            return result;
+          }
           EOF
 
           "$WASI_CLANG" \
-            --target=wasm32-wasip1 \
+            --target=wasm32-wasi \
             --sysroot="$WASI_SYSROOT_DIR" \
-            -resource-dir="$WASI_RESOURCE_DIR" \
+            -fPIC \
             "$TEST_DIR/test.c" \
             -o "$TEST_DIR/test-c.wasm"
 
           "$WASI_CLANGXX" \
-            --target=wasm32-wasip1 \
+            --target=wasm32-wasi \
             --sysroot="$WASI_SYSROOT_DIR" \
-            -resource-dir="$WASI_RESOURCE_DIR" \
+            -fPIC \
             "$TEST_DIR/test.cpp" \
             -o "$TEST_DIR/test-cxx.wasm"
 
           test -s "$TEST_DIR/test-c.wasm"
           test -s "$TEST_DIR/test-cxx.wasm"
+
+          LIBC_ARCHIVE="$WASI_SYSROOT_DIR/lib/wasm32-wasi/libc.a"
+          test -f "$LIBC_ARCHIVE"
+
+          if "$WASI_SDK_DIR/bin/llvm-nm" "$LIBC_ARCHIVE" 2>/dev/null \
+              | grep -F -q " U __wasm_first_page_end"; then
+            echo "::error::Pinned WASI libc imports __wasm_first_page_end"
+            exit 1
+          fi
+
           file "$TEST_DIR/test-c.wasm"
           file "$TEST_DIR/test-cxx.wasm"
+          echo "Coherent WASI SDK allocator/linker preflight passed"
 
       - name: Fetch exact Firefox source
         shell: bash
