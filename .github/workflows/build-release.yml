@@ -123,6 +123,137 @@ jobs:
           wasm-ld --version
           cbindgen --version
 
+      - name: Install and verify WASI SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Firefox builds several RLBox libraries as WebAssembly. Xcode's
+          # Apple Clang has no wasm32 backend, so use the official WASI SDK
+          # only for WASM_CC/WASM_CXX. Keep /usr/bin/clang for iOS itself.
+          WASI_VERSION="33"
+          WASI_VERSION_FULL="33.0"
+          WASI_ASSET="wasi-sdk-${WASI_VERSION_FULL}-arm64-macos.tar.gz"
+          WASI_SHA256="85c997a2665ead91673b5bb88b7d0df3fc8900df3bfa244f720d478187bbdc78"
+          WASI_URL="https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_VERSION}/${WASI_ASSET}"
+          WASI_ARCHIVE="$RUNNER_TEMP/$WASI_ASSET"
+          WASI_EXTRACT_ROOT="$RUNNER_TEMP/wasi-sdk-extracted"
+
+          rm -rf "$WASI_EXTRACT_ROOT"
+          mkdir -p "$WASI_EXTRACT_ROOT"
+
+          curl --fail --location \
+            --retry 5 \
+            --retry-all-errors \
+            "$WASI_URL" \
+            -o "$WASI_ARCHIVE"
+
+          ACTUAL_SHA256="$(
+            shasum -a 256 "$WASI_ARCHIVE" | awk '{ print $1 }'
+          )"
+
+          if [ "$ACTUAL_SHA256" != "$WASI_SHA256" ]; then
+            echo "::error::WASI SDK checksum mismatch"
+            echo "Expected: $WASI_SHA256"
+            echo "Actual:   $ACTUAL_SHA256"
+            exit 1
+          fi
+
+          tar -xzf "$WASI_ARCHIVE" -C "$WASI_EXTRACT_ROOT"
+
+          WASI_CLANG="$(
+            find "$WASI_EXTRACT_ROOT" \
+              -path '*/bin/clang' \
+              -type f \
+              -print -quit
+          )"
+
+          if [ -z "$WASI_CLANG" ]; then
+            echo "::error::Could not find bin/clang in the WASI SDK"
+            find "$WASI_EXTRACT_ROOT" -maxdepth 4 -print | sort | head -300
+            exit 1
+          fi
+
+          WASI_SDK_PATH="${WASI_CLANG%/bin/clang}"
+          WASI_CLANGXX="$WASI_SDK_PATH/bin/clang++"
+          WASI_WASM_LD="$WASI_SDK_PATH/bin/wasm-ld"
+          WASI_SYSROOT="$WASI_SDK_PATH/share/wasi-sysroot"
+
+          test -x "$WASI_CLANG"
+          test -x "$WASI_CLANGXX"
+          test -x "$WASI_WASM_LD"
+          test -d "$WASI_SYSROOT"
+
+          {
+            echo "WASI_SDK_PATH=$WASI_SDK_PATH"
+            echo "WASI_SYSROOT=$WASI_SYSROOT"
+            echo "WASM_CC=$WASI_CLANG --sysroot=$WASI_SYSROOT"
+            echo "WASM_CXX=$WASI_CLANGXX --sysroot=$WASI_SYSROOT"
+          } >> "$GITHUB_ENV"
+
+          "$WASI_CLANG" --version
+          "$WASI_WASM_LD" --version
+
+          TEST_DIR="$RUNNER_TEMP/wasi-compiler-test"
+          rm -rf "$TEST_DIR"
+          mkdir -p "$TEST_DIR"
+
+          cat > "$TEST_DIR/test.c" <<'EOF'
+          #include <stdlib.h>
+          #include <string.h>
+
+          int main(void) {
+            char* value = (char*)malloc(16);
+            if (!value) {
+              return 1;
+            }
+            memcpy(value, "reynard", 8);
+            int result = value[0] == 'r' ? 0 : 1;
+            free(value);
+            return result;
+          }
+          EOF
+
+          cat > "$TEST_DIR/test.cpp" <<'EOF'
+          #include <cstdlib>
+          #include <cstring>
+
+          int main() {
+            auto* value = static_cast<char*>(std::malloc(16));
+            if (!value) {
+              return 1;
+            }
+            std::memcpy(value, "reynard", 8);
+            int result = value[0] == 'r' ? 0 : 1;
+            std::free(value);
+            return result;
+          }
+          EOF
+
+          # Firefox 153 currently probes the compatibility spelling
+          # wasm32-wasi, so verify that exact target.
+          "$WASI_CLANG" \
+            --target=wasm32-wasi \
+            --sysroot="$WASI_SYSROOT" \
+            -fPIC \
+            "$TEST_DIR/test.c" \
+            -o "$TEST_DIR/test-c.wasm"
+
+          "$WASI_CLANGXX" \
+            --target=wasm32-wasi \
+            --sysroot="$WASI_SYSROOT" \
+            -fPIC \
+            "$TEST_DIR/test.cpp" \
+            -o "$TEST_DIR/test-cxx.wasm"
+
+          test -s "$TEST_DIR/test-c.wasm"
+          test -s "$TEST_DIR/test-cxx.wasm"
+
+          file "$TEST_DIR/test-c.wasm"
+          file "$TEST_DIR/test-cxx.wasm"
+
+          echo "Official WASI SDK compile and link tests passed"
+
       - name: Confirm Python 3
         run: python3 --version
 
@@ -136,9 +267,9 @@ jobs:
           path: |
             engine/firefox
             !engine/firefox/.git
-          key: gecko-${{ runner.os }}-${{ hashFiles('engine/release.txt') }}-${{ hashFiles('patches/**') }}
+          key: gecko-wasi33-${{ runner.os }}-${{ hashFiles('engine/release.txt') }}-${{ hashFiles('patches/**') }}
           restore-keys: |
-            gecko-${{ runner.os }}-${{ hashFiles('engine/release.txt') }}-
+            gecko-wasi33-${{ runner.os }}-${{ hashFiles('engine/release.txt') }}-
 
       - name: Download Gecko at the pinned release tag
         run: ./tools/development/update-gecko.sh
@@ -175,7 +306,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           export PATH="$LLD_BIN:$PATH"
+
+          test -x "${WASM_CC%% *}"
+          test -x "${WASM_CXX%% *}"
+          test -d "$WASI_SYSROOT"
+
+          echo "iOS compiler:  /usr/bin/clang"
+          echo "WASM compiler: $WASM_CC"
+          echo "WASM C++:      $WASM_CXX"
+          echo "iOS minimum:   13.0"
+
           ./tools/development/build-gecko.sh
 
       - name: Archive Reynard.app (unsigned)
