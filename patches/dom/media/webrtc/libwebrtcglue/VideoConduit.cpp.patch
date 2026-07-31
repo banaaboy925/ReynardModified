@@ -1,0 +1,25 @@
+diff --git a/dom/media/webrtc/libwebrtcglue/VideoConduit.cpp b/dom/media/webrtc/libwebrtcglue/VideoConduit.cpp
+index cf8c5066da..c0d04a53c2 100644
+--- a/dom/media/webrtc/libwebrtcglue/VideoConduit.cpp
++++ b/dom/media/webrtc/libwebrtcglue/VideoConduit.cpp
+@@ -2115,7 +2115,20 @@ bool WebrtcVideoConduit::HasCodecPluginID(uint64_t aPluginID) const {
+ }
+ 
+ bool WebrtcVideoConduit::HasH264Hardware() {
++#ifdef MOZ_WIDGET_UIKIT
++  // gfxVars::HasWebrtcH264Hw() is derived from the
++  // FEATURE_WEBRTC_HW_ACCELERATION_H264 gfxInfo blocklist, which is only
++  // populated by the CODEC_HW_FEATURE_SETUP(H264) feature gate in
++  // gfxPlatform.cpp for MOZ_WIDGET_GTK / MOZ_WIDGET_ANDROID / XP_WIN. It is
++  // never set on iOS, even though AppleDecoderModule/AppleEncoderModule
++  // already expose VideoToolbox-backed H.264 decode and encode through
++  // PDMFactory for ordinary <video> playback. Report hardware H.264 support
++  // directly here instead of relying on that desktop/Android-only blocklist
++  // mechanism, mirroring HasAv1() below.
++  return true;
++#else
+   return gfx::gfxVars::IsInitialized() && gfx::gfxVars::HasWebrtcH264Hw();
++#endif
+ }
+ 
+ bool WebrtcVideoConduit::HasAv1() { return true; }

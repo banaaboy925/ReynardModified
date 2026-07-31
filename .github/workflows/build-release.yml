@@ -1,0 +1,160 @@
+name: Build Reynard IPA/TIPA
+
+# Mirrors, step for step, the build process documented in README.md and
+# implemented in tools/development/*.sh and tools/release/*.sh:
+#
+#   git clone --recursive https://github.com/minh-ton/reynard-browser
+#   ./tools/development/update-gecko.sh
+#   ./tools/development/apply-patches.sh
+#   ./tools/development/build-idevice.sh
+#   ./tools/development/build-gecko.sh
+#   (open Reynard.xcodeproj / xcodebuild archive)
+#   -> tools/release/build-app.sh + tools/release/create-ipa.sh
+#
+# NOTE: this is a from-scratch Gecko/Firefox compile targeting
+# aarch64-apple-ios. Even cached, this routinely takes 1-4+ hours and can
+# need 30-50GB of disk for the source tree + object dir, which is more than
+# stock GitHub-hosted macOS runners provide by default. Use a runner with
+# enough disk (a `-xlarge` hosted runner or self-hosted Apple Silicon Mac)
+# and expect to tune this after a first real run - the maintainer's own
+# nightly-build workflow is not public, so this was reconstructed from the
+# documented scripts rather than copied from it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "reynard-browser ref to build (branch, tag, or SHA)"
+        required: false
+        default: "main"
+  push:
+    tags:
+      - "v*"
+
+env:
+  IOS_RUST_TARGET: aarch64-apple-ios
+
+jobs:
+  build:
+    # Apple Silicon hosted runner. Swap for a `-xlarge` variant or a
+    # self-hosted Mac if you hit the disk-space/time limits noted above.
+    runs-on: macos-15
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout reynard-browser
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || 'main' }}
+          # Do NOT use `submodules: recursive` here - .gitmodules points
+          # engine/firefox at the full mozilla-firefox/firefox history,
+          # and a naive recursive checkout will try to clone the whole
+          # thing instead of the single shallow release tag that
+          # update-gecko.sh fetches below.
+          submodules: false
+          fetch-depth: 0
+
+      - name: Checkout support/idevice submodule
+        run: git submodule update --init --depth 1 -- support/idevice
+
+      - name: Select Xcode
+        run: sudo xcode-select -p
+
+      - name: Show free disk space
+        run: df -h /
+
+      - name: Free up runner disk space
+        # Full Gecko builds are large; the preinstalled Android SDK/NDK,
+        # extra JVMs, etc. on GitHub-hosted macOS runners aren't needed here
+        # and are worth clearing before the build starts.
+        run: |
+          sudo rm -rf /Users/runner/Library/Android/sdk || true
+          sudo rm -rf /Applications/Xcode_*.app 2>/dev/null || true
+          df -h /
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.IOS_RUST_TARGET }}
+
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Confirm Python 3
+        run: python3 --version
+
+      - name: Cache Gecko engine checkout + object directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            engine/firefox
+            !engine/firefox/.git
+          key: gecko-${{ runner.os }}-${{ hashFiles('engine/release.txt') }}-${{ hashFiles('patches/**') }}
+          restore-keys: |
+            gecko-${{ runner.os }}-${{ hashFiles('engine/release.txt') }}-
+
+      - name: Download Gecko at the pinned release tag
+        run: ./tools/development/update-gecko.sh
+
+      - name: Apply Reynard's Gecko patches
+        run: ./tools/development/apply-patches.sh
+
+      - name: Build idevice FFI static library
+        run: ./tools/development/build-idevice.sh
+
+      - name: Build the Gecko engine (aarch64-apple-ios)
+        run: ./tools/development/build-gecko.sh
+
+      - name: Archive Reynard.app (unsigned)
+        # Per the README, distribution-certificate signing is not part of
+        # Reynard's supported sideloading flow (TrollStore/AltStore/SideStore
+        # all sign or fake-sign at install time), so the archive step here
+        # explicitly disables Xcode's automatic codesigning rather than
+        # requiring a real Apple Developer identity/provisioning profile in
+        # CI. If the maintainer's real signing setup differs, adjust here.
+        run: |
+          DIST_DIR="$GITHUB_WORKSPACE/dist"
+          PROJECT_PATH="$GITHUB_WORKSPACE/browser/Reynard.xcodeproj"
+          XCCONFIG_PATH="$GITHUB_WORKSPACE/browser/Configuration/Reynard.xcconfig"
+
+          rm -rf "$DIST_DIR"
+          mkdir -p "$DIST_DIR"
+          cp "$XCCONFIG_PATH" "$DIST_DIR/Reynard.xcconfig"
+
+          BUILD_SHA=$(git rev-parse HEAD | cut -c1-7)
+          sed -i '' "s/CURRENT_BUILD = .*/CURRENT_BUILD = $BUILD_SHA/" "$DIST_DIR/Reynard.xcconfig"
+
+          xcodebuild archive \
+            -scheme "Reynard" \
+            -archivePath "$DIST_DIR/Reynard.xcarchive" \
+            -project "$PROJECT_PATH" \
+            -sdk iphoneos \
+            -arch arm64 \
+            -configuration Release \
+            -xcconfig "$DIST_DIR/Reynard.xcconfig" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES
+
+      - name: Create Reynard.ipa / Reynard-TrollStore.tipa / Reynard-Jailbroken.ipa
+        run: ./tools/release/create-ipa.sh
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: reynard-ipa-tipa-${{ github.run_number }}
+          path: |
+            dist/Reynard.ipa
+            dist/Reynard-TrollStore.tipa
+            dist/Reynard-Jailbroken.ipa
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Reynard.ipa
+            dist/Reynard-TrollStore.tipa
+            dist/Reynard-Jailbroken.ipa

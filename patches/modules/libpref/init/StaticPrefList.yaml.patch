@@ -225,25 +225,6 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
      value: false
    #else
      value: true
-@@ -12644,7 +12670,7 @@
- - name: media.webrtc.encoder_creation_strategy
-   type: RelaxedAtomicUint32
--#ifdef ANDROID
-+#if defined(ANDROID) || defined(XP_IOS)
-   value: 1
- #else
-   value: 0
- #endif
-@@ -12758,8 +12784,8 @@
- 
- - name: media.webrtc.hw.h264.enabled
-   type: RelaxedAtomicBool
--#if defined(MOZ_WIDGET_ANDROID)
-+#if defined(MOZ_WIDGET_ANDROID) || defined(XP_IOS)
-   value: true
- #else
-   value: false
- #endif
 @@ -15074,7 +15100,10 @@
  - name: network.process.enabled
    type: RelaxedAtomicBool
