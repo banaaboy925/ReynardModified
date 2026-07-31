@@ -69,8 +69,8 @@ jobs:
         # and are worth clearing before the build starts.
         run: |
           sudo rm -rf /Users/runner/Library/Android/sdk || true
-          sudo rm -rf /Applications/Xcode_*.app 2>/dev/null || true
-          df -h /
+          # sudo rm -rf /Applications/Xcode_*.app 2>/dev/null || true
+          # df -h /
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
