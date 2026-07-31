@@ -83,6 +83,10 @@ jobs:
       - name: Confirm Python 3
         run: python3 --version
 
+      - name: Fix script permissions
+        run: |
+          find tools -name "*.sh" -exec chmod +x {} \;
+
       - name: Cache Gecko engine checkout + object directory
         uses: actions/cache@v4
         with:
