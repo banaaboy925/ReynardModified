@@ -87,12 +87,14 @@ jobs:
         with:
           targets: ${{ env.IOS_RUST_TARGET }}
 
-      - name: Install ldid and llvm
-        # llvm (Homebrew) provides a real ld64.lld. build-gecko.sh points
+      - name: Install ldid and lld
+        # lld (Homebrew) provides a real ld64.lld. build-gecko.sh points
         # mozconfig at it explicitly (--enable-linker=lld) instead of
         # letting moz.configure autodetect/probe Xcode's own linker, which
         # is what was failing with "Failed to find an adequate linker".
-        run: brew install ldid llvm
+        # Note: ld64.lld used to ship inside the llvm formula; Homebrew has
+        # since split it out into its own `lld` formula.
+        run: brew install ldid lld
 
       - name: Confirm Python 3
         run: python3 --version
