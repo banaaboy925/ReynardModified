@@ -39,8 +39,17 @@ fi
 	echo "ac_add_options --disable-debug"
 	echo "ac_add_options --disable-tests"
 	echo "ac_add_options --enable-linker=lld"
-	echo "mk_add_options 'export PATH=$LLD_PREFIX/bin:\$PATH'"
 } > "$FIREFOX_DIR/.mozconfig"
+
+# Prepend lld's bin dir to PATH here, in a real shell, rather than via
+# mozconfig's `mk_add_options 'export PATH=...'`. That directive is only
+# partially parsed by mozbuild's Python mozconfig reader (not run through an
+# actual shell), so a trailing "$PATH" in it is never expanded - it ends up
+# replacing PATH with a literal string missing /bin, breaking mozconfig's own
+# `sh` lookup (FileNotFoundError: No such file or directory: 'sh') before the
+# build even starts. Exporting it in this script's real environment instead
+# means every subprocess mach spawns inherits a correctly expanded PATH.
+export PATH="$LLD_PREFIX/bin:$PATH"
 
 if ! rustup target list | grep -q "^$TARGET (installed)"; then
 	rustup target add "$TARGET"
