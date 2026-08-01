@@ -87,6 +87,13 @@ jobs:
         with:
           targets: ${{ env.IOS_RUST_TARGET }}
 
+      - name: Install cbindgen
+        # Needed by moz.configure to generate C bindings for
+        # gfx/webrender_bindings; not preinstalled on the runner, and not
+        # something Homebrew packages, so it's installed via cargo as the
+        # configure error itself suggests.
+        run: cargo install cbindgen --locked
+
       - name: Install ldid and lld
         # lld (Homebrew) provides a real ld64.lld. build-gecko.sh points
         # mozconfig at it explicitly (--enable-linker=lld) instead of
