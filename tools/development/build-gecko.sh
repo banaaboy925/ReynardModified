@@ -30,6 +30,21 @@ if [ -z "$LLD_PREFIX" ] || [ ! -x "$LLD_PREFIX/bin/ld64.lld" ]; then
 	exit 1
 fi
 
+# Firefox's rlbox wasm sandboxing (used to isolate expat, woff2, and other
+# third-party libraries this patchset touches) needs a real C/C++ compiler
+# that can target wasm32-wasi. Xcode's bundled clang only ships Apple's own
+# target backends (arm64/x86_64) and errors with "unable to create target:
+# ... wasm32-unknown-wasi" when probed. A stock upstream LLVM build (e.g.
+# Homebrew's llvm formula, already pulled in as an lld dependency) includes
+# the WebAssembly backend, so point WASM_CC/WASM_CXX at that instead.
+LLVM_PREFIX="$(brew --prefix llvm 2>/dev/null || true)"
+if [ -z "$LLVM_PREFIX" ] || [ ! -x "$LLVM_PREFIX/bin/clang" ]; then
+	echo "Homebrew's llvm (with a wasm32-capable clang) is required; run 'brew install llvm' first." >&2
+	exit 1
+fi
+export WASM_CC="$LLVM_PREFIX/bin/clang"
+export WASM_CXX="$LLVM_PREFIX/bin/clang++"
+
 {
 	echo "ac_add_options --enable-application=mobile/ios"
 	echo "ac_add_options --target=$TARGET"
