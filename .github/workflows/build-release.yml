@@ -59,25 +59,22 @@ jobs:
           submodules: false
           fetch-depth: 0
 
-      - name: Register submodules
-        # `git submodule init` (no path arg) just writes each submodule's
-        # URL from .gitmodules into .git/config for every submodule,
-        # including engine/firefox - it does NOT clone or fetch anything.
-        # This is required for update-gecko.sh's own
-        # `git submodule status -- engine/firefox` sanity check to pass;
-        # without it that check fails with "Missing submodule engine/firefox"
-        # even though .gitmodules lists it, because `submodules: false`
-        # above means actions/checkout never registered it. The actual
-        # fetch/checkout of engine/firefox at the pinned release tag is
-        # still handled entirely by update-gecko.sh below, on top of
-        # whatever the cache step restores - we deliberately don't run
-        # `submodule update` on engine/firefox here, since that would
-        # start cloning the full mozilla-firefox/firefox history instead
-        # of the single shallow tag update-gecko.sh fetches.
-        run: git submodule init
-
-      - name: Checkout support/idevice submodule
-        run: git submodule update --init --depth 1 -- support/idevice
+      - name: Checkout submodules
+        # update-gecko.sh sanity-checks `git submodule status -- engine/firefox`
+        # before it does anything else, and bails with "Missing submodule
+        # engine/firefox" if that fails. A config-only `git submodule init`
+        # (no clone) turned out not to be enough to satisfy that check on
+        # this runner's git version - so instead we do the real
+        # `submodule update --init --depth 1` for BOTH submodules here,
+        # which is the exact same command update-gecko.sh itself runs for
+        # engine/firefox right after that check passes. Running it early
+        # just means update-gecko.sh's own call is a cheap no-op/re-sync on
+        # top of what we already have; it does NOT clone
+        # mozilla-firefox/firefox's full history - `--depth 1` still only
+        # fetches the tip of the default branch, same as update-gecko.sh
+        # would do on its own. update-gecko.sh then fetches and checks out
+        # the actual pinned release tag on top of this.
+        run: git submodule update --init --depth 1 -- engine/firefox support/idevice
 
       - name: Select Xcode
         run: sudo xcode-select -p
