@@ -136,6 +136,27 @@ jobs:
       - name: Download Gecko at the pinned release tag
         run: ./tools/development/update-gecko.sh
 
+      - name: Reset engine/firefox to a pristine tree
+        # The cache step above restores engine/firefox's *files* from
+        # whatever a previous run left behind - including patches already
+        # applied (tracked-file changes) and any .orig/.rej files from a
+        # conflicted `git apply --3way` - even though update-gecko.sh just
+        # correctly checked out the right release tag on top of that.
+        # apply-patches.sh refuses to run against a dirty tree
+        # (`git status --porcelain` must be empty), so discard exactly
+        # that leftover diff/untracked cruft here before patching.
+        #
+        # Deliberately `reset --hard` + `clean -ffd` WITHOUT `-x`: `-x`
+        # would also delete gitignored files, which is where Firefox's
+        # build object directory normally lives if it's nested under
+        # engine/firefox - wiping that out would defeat the point of
+        # caching engine/firefox (the object dir) for faster rebuilds.
+        # Plain untracked-but-not-ignored cruft still gets removed, which
+        # is all that's needed to make apply-patches.sh's check pass.
+        run: |
+          git -C engine/firefox reset --hard
+          git -C engine/firefox clean -ffd
+
       - name: Apply Reynard's Gecko patches
         run: ./tools/development/apply-patches.sh
 
