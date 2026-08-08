@@ -59,6 +59,23 @@ jobs:
           submodules: false
           fetch-depth: 0
 
+      - name: Register submodules
+        # `git submodule init` (no path arg) just writes each submodule's
+        # URL from .gitmodules into .git/config for every submodule,
+        # including engine/firefox - it does NOT clone or fetch anything.
+        # This is required for update-gecko.sh's own
+        # `git submodule status -- engine/firefox` sanity check to pass;
+        # without it that check fails with "Missing submodule engine/firefox"
+        # even though .gitmodules lists it, because `submodules: false`
+        # above means actions/checkout never registered it. The actual
+        # fetch/checkout of engine/firefox at the pinned release tag is
+        # still handled entirely by update-gecko.sh below, on top of
+        # whatever the cache step restores - we deliberately don't run
+        # `submodule update` on engine/firefox here, since that would
+        # start cloning the full mozilla-firefox/firefox history instead
+        # of the single shallow tag update-gecko.sh fetches.
+        run: git submodule init
+
       - name: Checkout support/idevice submodule
         run: git submodule update --init --depth 1 -- support/idevice
 
