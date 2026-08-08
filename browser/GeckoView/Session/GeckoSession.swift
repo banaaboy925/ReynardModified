@@ -174,7 +174,20 @@ public class GeckoSession {
             "viewportMode": sessionSettings.websiteMode.viewportMode,
             "pageZoom": sessionSettings.pageZoom.scale,
             "displayMode": 0,
-            "suspendMediaWhenInactive": false,
+            // Must be true: when the app is backgrounded (screen lock, app switch, etc.)
+            // SessionManager calls session.setActive(false) on the active session, but the
+            // OS forcibly tears down camera/mic capture in the background regardless
+            // (AVCaptureSession posts an interruption with reason
+            // .videoDeviceNotAvailableInBackground). If Gecko itself isn't told to suspend
+            // media on inactivity, its own WebRTC capture pipeline doesn't get a chance to
+            // gracefully stop and release its camera buffer pool before that OS-level
+            // teardown happens. On resume it then re-initializes capture on top of
+            // never-released buffers, which spikes memory and crashes the process
+            // (observed as a black screen then an OOM kill, worse on the back camera
+            // because its capture formats are much larger than the front camera's).
+            // Setting this to true makes Gecko suspend (and later cleanly resume) camera/
+            // mic/video playback in lockstep with setActive(), avoiding that race entirely.
+            "suspendMediaWhenInactive": true,
             "allowJavascript": true,
             "fullAccessibilityTree": false,
             "isExtensionPopup": isAddonPopup,
